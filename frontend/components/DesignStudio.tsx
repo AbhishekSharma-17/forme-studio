@@ -1272,8 +1272,22 @@ function PsdTierMenu({
             }}
           />
           <TierMenuItem
+            available={tiers.tier_a_ocr}
+            label="Tier A+OCR · Editable text"
+            description={
+              tiers.tier_a_ocr
+                ? "Flat + Tesseract text overlays + .ocr.json sidecar (no SAM-2 needed)"
+                : "Enable Tier C + Tesseract in Settings"
+            }
+            icon={<Type size={14} />}
+            onClick={() => {
+              setOpen(false);
+              if (tiers.tier_a_ocr) onPick("A+OCR");
+            }}
+          />
+          <TierMenuItem
             available={tiers.tier_b}
-            label="Tier B · Layered"
+            label="Tier B · Layered (SAM-2)"
             description={
               tiers.tier_b
                 ? "SAM-2 masks as separate layers"
@@ -1287,11 +1301,11 @@ function PsdTierMenu({
           />
           <TierMenuItem
             available={tiers.tier_c}
-            label="Tier C · Editable text"
+            label="Tier C · Layered + editable text"
             description={
               tiers.tier_c
-                ? "Tier B + OCR'd text overlay + JSON sidecar"
-                : "Enable Tier C + Tesseract in Settings"
+                ? "Tier B + OCR'd text overlays + sidecar"
+                : "Needs Tier B + Tier C toggle"
             }
             icon={<Type size={14} />}
             onClick={() => {

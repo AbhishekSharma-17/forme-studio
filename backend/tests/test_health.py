@@ -39,5 +39,11 @@ def test_health_returns_ok_with_capabilities(client: TestClient) -> None:
         "cdr_fallback": "uniconvertor",
     }
 
-    # Tier availability — A always true; B+C false in CI.
-    assert body["tiers"] == {"tier_a": True, "tier_b": False, "tier_c": False}
+    # Tier availability — A always true; A+OCR depends on FORME_TIER_C_ENABLED
+    # (off in CI conftest) so it's False; B+C also False (no seg provider).
+    assert body["tiers"] == {
+        "tier_a": True,
+        "tier_a_ocr": False,
+        "tier_b": False,
+        "tier_c": False,
+    }

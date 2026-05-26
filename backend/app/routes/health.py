@@ -39,9 +39,10 @@ class Capabilities(BaseModel):
 class TierAvailability(BaseModel):
     """Which PSD tiers the current configuration can serve right now."""
 
-    tier_a: bool  # always true
-    tier_b: bool  # segmentation provider reachable
-    tier_c: bool  # tier B reachable + Tesseract + FORME_TIER_C_ENABLED=true
+    tier_a: bool      # always true
+    tier_a_ocr: bool  # Tesseract + FORME_TIER_C_ENABLED=true (no seg dep)
+    tier_b: bool      # segmentation provider reachable
+    tier_c: bool      # tier_b + Tesseract + FORME_TIER_C_ENABLED=true
 
 
 class ProvidersSelected(BaseModel):
@@ -117,6 +118,9 @@ async def health() -> HealthOut:
         ),
         tiers=TierAvailability(
             tier_a=True,
+            # A+OCR needs Tesseract + the OCR toggle, but NOT segmentation —
+            # that's the whole point of the tier.
+            tier_a_ocr=tesseract_present and s.tier_c_enabled,
             tier_b=seg_ready,
             tier_c=seg_ready and tesseract_present and s.tier_c_enabled,
         ),

@@ -59,6 +59,10 @@ def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # test asserts the default-off state, hence the conftest leaves it off.
     monkeypatch.setenv("FORME_CDR_ENABLED", "false")
     monkeypatch.setenv("FORME_CLOUDCONVERT_SANDBOX", "false")
+    # Tier C (and Tier A+OCR) share this toggle. The real .env may have it
+    # ON (the user flipped it via the dashboard once), but tests must see
+    # the off-by-default state unless they opt in explicitly.
+    monkeypatch.setenv("FORME_TIER_C_ENABLED", "false")
     # Reset markup so cost assertions don't have to chase a moving target.
     monkeypatch.setenv("FORME_PRICING_MARKUP_PERCENT", "0")
     # Point Inkscape at a path that doesn't exist so the capability flag is

@@ -26,6 +26,7 @@ export interface HealthCapabilities {
 
 export interface TierAvailability {
   tier_a: boolean;
+  tier_a_ocr: boolean;
   tier_b: boolean;
   tier_c: boolean;
 }
@@ -160,7 +161,7 @@ export interface ReferenceUploadResponse {
   total: number;
 }
 
-export type PsdTier = "A" | "B" | "C";
+export type PsdTier = "A" | "A+OCR" | "B" | "C";
 
 export interface PsdExportRequest {
   source_asset_id: number;
