@@ -54,15 +54,18 @@ export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSel
     const containerRef = useRef<HTMLDivElement | null>(null);
 
     // Extract options dynamically from children options
-    const options = React.Children.map(children, (child) => {
+    const rawOptions = React.Children.map(children, (child) => {
       if (React.isValidElement(child) && child.type === "option") {
+        const propsObj = child.props as { value?: unknown; children?: React.ReactNode };
         return {
-          value: child.props.value,
-          label: child.props.children,
+          value: String(propsObj.value ?? ""),
+          label: String(propsObj.children ?? ""),
         };
       }
       return null;
-    }).filter(Boolean) as { value: string; label: string }[];
+    });
+
+    const options = (rawOptions || []).filter(Boolean) as { value: string; label: string }[];
 
     const activeOption = options.find((opt) => String(opt.value) === String(value)) || options[0];
 
