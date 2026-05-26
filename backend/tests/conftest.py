@@ -39,29 +39,23 @@ def isolated_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Scrub provider credentials so tests can't leak to live APIs.
     for k in (
         "OPENAI_API_KEY",
-        "REPLICATE_API_TOKEN",
         "VECTORIZER_AI_API_ID",
         "VECTORIZER_AI_API_KEY",
-        "FORME_SEGMENTATION_SELF_HOSTED_URL",
-        "FORME_SEGMENTATION_SELF_HOSTED_TOKEN",
-        "FORME_SAM3_ENDPOINT_URL",
-        "FORME_SAM3_ENDPOINT_TOKEN",
         "CLOUDCONVERT_API_KEY",
         "CLOUDCONVERT_SANDBOX_API_KEY",
     ):
         monkeypatch.setenv(k, "")
-    # Default providers in tests: vectorizer paid, fallback potrace, no seg.
+    # Default providers in tests: vectorizer paid, fallback potrace.
     monkeypatch.setenv("FORME_VECTORIZER_PROVIDER", "vectorizer_ai")
     monkeypatch.setenv("FORME_VECTORIZER_FALLBACK", "inkscape_potrace")
-    monkeypatch.setenv("FORME_SEGMENTATION_PROVIDER", "none")
     # CDR exports are off-by-default in production; individual tests that
     # exercise the CDR endpoint flip this on explicitly. The health-route
     # test asserts the default-off state, hence the conftest leaves it off.
     monkeypatch.setenv("FORME_CDR_ENABLED", "false")
     monkeypatch.setenv("FORME_CLOUDCONVERT_SANDBOX", "false")
-    # Tier C (and Tier A+OCR) share this toggle. The real .env may have it
-    # ON (the user flipped it via the dashboard once), but tests must see
-    # the off-by-default state unless they opt in explicitly.
+    # Tier A+OCR (OCR-augmented PSD) is gated by this toggle. The real .env
+    # may have it ON (the user flipped it via the dashboard once), but tests
+    # must see the off-by-default state unless they opt in explicitly.
     monkeypatch.setenv("FORME_TIER_C_ENABLED", "false")
     # Reset markup so cost assertions don't have to chase a moving target.
     monkeypatch.setenv("FORME_PRICING_MARKUP_PERCENT", "0")

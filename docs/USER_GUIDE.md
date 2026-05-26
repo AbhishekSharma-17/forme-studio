@@ -139,29 +139,41 @@ instant Tier A export, or the chevron on the right for the full menu:
 | Tier | What it is | Use when |
 | --- | --- | --- |
 | **A · Flat** | Single CMYK layer at 300 DPI | Quick proof, simple SKUs, fastest |
-| **B · Layered** | Tier A + one alpha layer per SAM-2 mask | Designer needs to swap/move regions |
-| **C · Editable text** | Tier B + OCR'd text overlays + JSON sidecar | Designer needs to retype copy without re-rendering |
+| **A+OCR · Editable text** | Tier A + Tesseract-OCR'd text overlays + `.ocr.json` sidecar | Designer needs to retype copy or fix garbled small print without re-rendering |
+| **Composable · Best quality** | Multi-layered editable PSD — every visual element regenerated on a transparent canvas, assembled by name + position | Designer needs the full Photoshop file with each logo / illustration / wordmark as its own editable layer |
 
 - The file downloads immediately *and* persists under
   `workspaces/<slug>/exports/`.
-- Tier C also writes a sidecar `.ocr.json` listing every detected text
-  region with `text`, `bbox`, and `confidence`.
+- Tier A+OCR also writes a sidecar `.ocr.json` listing every detected
+  text region with `text`, `bbox`, and `confidence`.
 - The **Exports** section at the bottom of the page lists every export
   with filename, tier, size, and a re-download link.
 
-#### When Tier B / C are unavailable
+#### When Tier A+OCR is unavailable
 
-- **Tier B grey** → segmentation provider isn't reachable. Open
-  Settings → flip `Segmentation provider` to `replicate` (paid) or
-  `self_hosted` (your DGX), and confirm the credentials in the
-  Credentials section are set.
-- **Tier C grey** → either Tier B isn't ready, Tesseract isn't on the
-  configured path, or `FORME_TIER_C_ENABLED` is off. The Settings page
-  shows all three and explains the fix.
+The dropdown item greys out when either Tesseract isn't on the
+configured path **or** `FORME_TIER_C_ENABLED` is off. The Settings page
+shows both and explains the fix (`brew install tesseract`, then flip
+the *Tier A+OCR* toggle in Settings).
 
-Forme never auto-falls-back. If the primary segmentation provider
-errors mid-export the error is surfaced and you choose what to do — the
-output that lands on disk is always anchored to a known provider.
+#### The Composable flow
+
+Picking **Composable** from the PSD ▾ menu opens a review dialog:
+
+1. Forme calls GPT-4o-mini vision over your approved generation and
+   returns a JSON manifest of detected elements (logos, headlines,
+   illustrations, ornaments, body-copy blocks) with positions in mm.
+2. You review the manifest — edit any element's prompt, change its
+   kind, reposition / resize, add missing elements, or remove ones you
+   don't want regenerated.
+3. Pick a quality (medium / high) and click *Generate + assemble*.
+4. Forme fires one gpt-image-2 call per element with
+   `background=transparent`, then assembles the results by name +
+   position into a layered CMYK PSD.
+
+Every element lands as its own `Asset(kind="generation")` in the
+gallery (regeneratable individually) and the final composable PSD lands
+in the Exports table.
 
 ### 3.8 Export as Print PDF/X-4
 
@@ -269,10 +281,10 @@ Top-right navigation: **Settings**.
 
 Four sections, top to bottom:
 
-1. **Provider routing** — pick your vector + segmentation providers.
-   Both stages have a *primary* and a *fallback*. Fallbacks are **never
+1. **Provider routing** — pick your vector + CDR providers. Each stage
+   has a *primary* and a *fallback*. Fallbacks are **never
    auto-invoked**; if a primary fails the UI shows the error + a
-   "Try with fallback?" button (post-MVP).
+   "Try with fallback?" button.
 2. **Model & cost** — image model snapshot pin, markup percent over the
    OpenAI bill, request timeout.
 3. **Credentials** — every secret is shown **redacted**

@@ -143,19 +143,20 @@ class PsdExportRequest(BaseModel):
 
     Tier selects the export pipeline:
 
-      * ``A`` — flat single-layer PSD (no segmentation). Always available.
-      * ``B`` — layered PSD via SAM-2. Requires ``segmentation_provider``
-        to be reachable.
-      * ``C`` — Tier B + OCR text-region overlays + JSON sidecar.
-        Requires segmentation **and** Tesseract **and**
-        ``FORME_TIER_C_ENABLED=true``.
+      * ``A`` — flat single-layer PSD. Always available.
+      * ``A+OCR`` — Tier A plus Tesseract-detected text-region overlays
+        (each layer named with the detected text) + a JSON sidecar.
+        Requires Tesseract on PATH **and** ``FORME_TIER_C_ENABLED=true``.
+
+    For a fully multi-layered editable PSD with every visual element as
+    its own layer, see ``POST /exports/psd-composable``.
     """
 
     source_asset_id: int = Field(
         ..., description="Generation asset to wrap as PSD."
     )
     tier: str = Field(
-        "A", description="'A' (flat), 'B' (layered), or 'C' (layered + OCR)."
+        "A", description="'A' (flat) or 'A+OCR' (flat + text overlays)."
     )
     color_space: str = Field(
         "CMYK",
@@ -178,7 +179,6 @@ class PsdExportResponse(BaseModel):
     height: int
     layer_count: int
     sidecar_url: str | None = None
-    segmentation_provider: str | None = None
     text_layer_count: int | None = None
 
 

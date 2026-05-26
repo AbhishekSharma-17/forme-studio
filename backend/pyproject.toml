@@ -15,7 +15,6 @@ dependencies = [
     "openai>=1.54.0",
     "pillow>=11.0.0",
     "psd-tools>=1.10.0",
-    "replicate>=0.34.0",
     "pytesseract>=0.3.13",
     "reportlab>=4.2.5",
 ]
@@ -51,8 +50,6 @@ plugins = ["pydantic.mypy"]
 module = [
     "pytesseract",
     "pytesseract.*",
-    "replicate",
-    "replicate.*",
     "reportlab",
     "reportlab.*",
 ]

@@ -36,15 +36,9 @@ WRITABLE_KEYS: tuple[str, ...] = (
     "FORME_VECTORIZER_FALLBACK",
     "FORME_VECTORIZER_AI_MODE",
     "FORME_VECTORIZER_TIMEOUT_S",
-    "FORME_SEGMENTATION_PROVIDER",
-    "FORME_SEGMENTATION_SELF_HOSTED_URL",
-    "FORME_SAM3_ENDPOINT_URL",
-    "FORME_SAM3_TEXT_PROMPT",
-    "FORME_REPLICATE_SAM2_MODEL",
     "FORME_PRICING_MARKUP_PERCENT",
     "FORME_OPENAI_IMAGE_MODEL",
     "FORME_IMAGE_TIMEOUT_S",
-    "FORME_SEGMENTATION_TIMEOUT_S",
     "FORME_INKSCAPE_PATH",
     "FORME_UNICONVERTOR_PATH",
     "FORME_CDR_ENABLED",
@@ -101,11 +95,8 @@ class SettingsOut(BaseModel):
 
     # AI credentials (redacted)
     openai_api_key: SecretField
-    replicate_api_token: SecretField
     vectorizer_ai_api_id: SecretField
     vectorizer_ai_api_key: SecretField
-    segmentation_self_hosted_token: SecretField
-    sam3_endpoint_token: SecretField
     cloudconvert_api_key: SecretField
     cloudconvert_sandbox_api_key: SecretField
 
@@ -114,11 +105,6 @@ class SettingsOut(BaseModel):
     vectorizer_fallback: Literal["vectorizer_ai", "inkscape_potrace", "none"] | None
     vectorizer_ai_mode: Literal["production", "test", "preview"]
     vectorizer_timeout_s: float
-    segmentation_provider: Literal["replicate", "self_hosted", "sam3", "none"]
-    segmentation_self_hosted_url: str | None
-    sam3_endpoint_url: str | None
-    sam3_endpoint_present: bool
-    sam3_text_prompt: str | None
 
     # Models + pricing + timeouts
     openai_image_model: str
@@ -141,9 +127,7 @@ class SettingsOut(BaseModel):
     cdr_timeout_s: float
     cloudconvert_sandbox: bool
 
-    # SAM-2 + Tier C
-    replicate_sam2_model: str
-    segmentation_timeout_s: float
+    # OCR / Tier A+OCR
     tier_c_enabled: bool
 
     # Print PDF/X-4 ICC
@@ -163,12 +147,6 @@ class SettingsPatch(BaseModel):
     vectorizer_fallback: Literal["vectorizer_ai", "inkscape_potrace", "none"] | None = None
     vectorizer_ai_mode: Literal["production", "test", "preview"] | None = None
     vectorizer_timeout_s: float | None = Field(default=None, ge=10.0, le=600.0)
-    segmentation_provider: Literal["replicate", "self_hosted", "sam3", "none"] | None = (
-        None
-    )
-    segmentation_self_hosted_url: str | None = None
-    sam3_endpoint_url: str | None = None
-    sam3_text_prompt: str | None = None
     pricing_markup_percent: float | None = Field(default=None, ge=0.0, le=1000.0)
     openai_image_model: str | None = Field(default=None, max_length=80)
     image_generation_timeout_s: float | None = Field(default=None, ge=10.0, le=600.0)
@@ -180,10 +158,8 @@ class SettingsPatch(BaseModel):
     cdr_timeout_s: float | None = Field(default=None, ge=10.0, le=600.0)
     cloudconvert_sandbox: bool | None = None
     log_level: Literal["debug", "info", "warning", "error"] | None = None
-    # Tier C / SAM-2 / OCR
+    # OCR / Tier A+OCR
     tier_c_enabled: bool | None = None
-    replicate_sam2_model: str | None = Field(default=None, max_length=200)
-    segmentation_timeout_s: float | None = Field(default=None, ge=10.0, le=600.0)
     tesseract_cmd: str | None = None
     tesseract_lang: str | None = Field(default=None, max_length=40)
     # Print PDF/X-4
@@ -242,10 +218,6 @@ def _patch_to_env_updates(patch: SettingsPatch) -> dict[str, str]:
         "vectorizer_fallback": "FORME_VECTORIZER_FALLBACK",
         "vectorizer_ai_mode": "FORME_VECTORIZER_AI_MODE",
         "vectorizer_timeout_s": "FORME_VECTORIZER_TIMEOUT_S",
-        "segmentation_provider": "FORME_SEGMENTATION_PROVIDER",
-        "segmentation_self_hosted_url": "FORME_SEGMENTATION_SELF_HOSTED_URL",
-        "sam3_endpoint_url": "FORME_SAM3_ENDPOINT_URL",
-        "sam3_text_prompt": "FORME_SAM3_TEXT_PROMPT",
         "pricing_markup_percent": "FORME_PRICING_MARKUP_PERCENT",
         "openai_image_model": "FORME_OPENAI_IMAGE_MODEL",
         "image_generation_timeout_s": "FORME_IMAGE_TIMEOUT_S",
@@ -258,8 +230,6 @@ def _patch_to_env_updates(patch: SettingsPatch) -> dict[str, str]:
         "cloudconvert_sandbox": "FORME_CLOUDCONVERT_SANDBOX",
         "log_level": "FORME_LOG_LEVEL",
         "tier_c_enabled": "FORME_TIER_C_ENABLED",
-        "replicate_sam2_model": "FORME_REPLICATE_SAM2_MODEL",
-        "segmentation_timeout_s": "FORME_SEGMENTATION_TIMEOUT_S",
         "tesseract_cmd": "FORME_TESSERACT_CMD",
         "tesseract_lang": "FORME_TESSERACT_LANG",
         "print_icc_path": "FORME_PRINT_ICC_PATH",
@@ -295,22 +265,11 @@ async def read_settings() -> SettingsOut:
         openai_api_key=SecretField(
             set=bool(s.openai_api_key), preview=_redact(s.openai_api_key)
         ),
-        replicate_api_token=SecretField(
-            set=bool(s.replicate_api_token), preview=_redact(s.replicate_api_token)
-        ),
         vectorizer_ai_api_id=SecretField(
             set=bool(s.vectorizer_ai_api_id), preview=_redact(s.vectorizer_ai_api_id)
         ),
         vectorizer_ai_api_key=SecretField(
             set=bool(s.vectorizer_ai_api_key), preview=_redact(s.vectorizer_ai_api_key)
-        ),
-        segmentation_self_hosted_token=SecretField(
-            set=bool(s.segmentation_self_hosted_token),
-            preview=_redact(s.segmentation_self_hosted_token),
-        ),
-        sam3_endpoint_token=SecretField(
-            set=bool(s.sam3_endpoint_token),
-            preview=_redact(s.sam3_endpoint_token),
         ),
         cloudconvert_api_key=SecretField(
             set=bool(s.cloudconvert_api_key),
@@ -324,11 +283,6 @@ async def read_settings() -> SettingsOut:
         vectorizer_fallback=s.vectorizer_fallback,
         vectorizer_ai_mode=s.vectorizer_ai_mode,
         vectorizer_timeout_s=s.vectorizer_timeout_s,
-        segmentation_provider=s.segmentation_provider,
-        segmentation_self_hosted_url=s.segmentation_self_hosted_url or None,
-        sam3_endpoint_url=s.sam3_endpoint_url or None,
-        sam3_endpoint_present=bool(s.sam3_endpoint_url),
-        sam3_text_prompt=s.sam3_text_prompt or None,
         openai_image_model=s.openai_image_model,
         pricing_markup_percent=s.pricing_markup_percent,
         image_generation_timeout_s=s.image_generation_timeout_s,
@@ -344,8 +298,6 @@ async def read_settings() -> SettingsOut:
         tesseract_cmd=s.tesseract_cmd,
         tesseract_present=shutil.which(s.tesseract_cmd) is not None,
         tesseract_lang=s.tesseract_lang,
-        replicate_sam2_model=s.replicate_sam2_model,
-        segmentation_timeout_s=s.segmentation_timeout_s,
         tier_c_enabled=s.tier_c_enabled,
         print_icc_path=s.print_icc_path,
         print_icc_present=Path(s.print_icc_path).is_file(),

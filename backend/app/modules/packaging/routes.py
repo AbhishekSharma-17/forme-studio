@@ -78,8 +78,6 @@ from app.services.export_psd import (
     derive_export_filename,
     export_to_psd,
     export_to_psd_a_ocr,
-    export_to_psd_tier_b,
-    export_to_psd_tier_c,
 )
 from app.services.filesystem import ensure_workspace_dir, slugify, workspace_root
 from app.services.image_normalize import NormalizeError, normalize
@@ -94,7 +92,6 @@ from app.services.openai_image import (
     generate_stream,
 )
 from app.services.pricing import apply_markup, cost_from_usage
-from app.services.segmentation import segment as run_segmentation
 from app.services.vector import (
     derive_export_filename as derive_vector_filename,
 )
@@ -855,7 +852,7 @@ async def upload_references(
     "/workspaces/{slug}/exports/psd",
     response_model=PsdExportResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Export a generation as Tier A flat PSD (CMYK / RGB, 300 DPI)",
+    summary="Export a generation as PSD — Tier A flat or Tier A+OCR with editable text overlays",
 )
 async def export_psd(
     body: PsdExportRequest,
@@ -864,9 +861,13 @@ async def export_psd(
 ) -> PsdExportResponse:
     """Wrap a generation PNG in a Photoshop file with workspace print specs.
 
-    Tier A = single flat layer in the requested colour space. Tier B
-    (layered via SAM-2) lands once the self-hosted segmentation endpoint
-    is wired in slice 4.5.
+    * **Tier A** — single flat layer in the requested colour space.
+    * **Tier A+OCR** — Tier A plus one named layer per Tesseract-detected
+      text region + a JSON sidecar.
+
+    For a multi-layered editable PSD with every visual element as its
+    own transparent layer, see the Composable PSD endpoint at
+    ``/exports/psd-composable``.
     """
     if body.color_space.upper() not in {"CMYK", "RGB"}:
         raise HTTPException(
@@ -880,24 +881,23 @@ async def export_psd(
     if raw_tier == "OCR":
         raw_tier = "A+OCR"
     tier = raw_tier
-    if tier not in {"A", "B", "C", "A+OCR"}:
+    if tier not in {"A", "A+OCR"}:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
-                f"tier must be 'A', 'A+OCR', 'B', or 'C', got '{body.tier}'."
+                f"tier must be 'A' or 'A+OCR', got '{body.tier}'."
             ),
         )
 
     settings = get_settings()
-    # Tier C (SAM-2 + OCR) and A+OCR (OCR-only) both need the OCR pipeline,
-    # which is gated by the same FORME_TIER_C_ENABLED toggle.
-    if tier in {"C", "A+OCR"} and not settings.tier_c_enabled:
+    # Tier A+OCR shares the OCR-enabled toggle.
+    if tier == "A+OCR" and not settings.tier_c_enabled:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                f"Tier {tier} requires OCR which is disabled. Enable "
+                "Tier A+OCR requires OCR which is disabled. Enable "
                 "FORME_TIER_C_ENABLED=true in your .env (or toggle in "
-                "Settings → Tier C)."
+                "Settings → PSD tiers)."
             ),
         )
 
@@ -918,7 +918,6 @@ async def export_psd(
     )
 
     source_path = absolute_path(workspace, source)
-    segmentation = None
     ocr_result = None
 
     try:
@@ -929,10 +928,7 @@ async def export_psd(
                 color_space=color_space,  # type: ignore[arg-type]
                 dpi=body.dpi,
             )
-        elif tier == "A+OCR":
-            # Flat PSD + OCR text overlays. NO segmentation dependency —
-            # this exists specifically so users can fix garbled text
-            # without needing SAM-2/SAM-3 to be available.
+        else:  # tier == "A+OCR"
             try:
                 ocr_result = ocr_extract(source_path.read_bytes())
             except OcrUnavailableError as exc:
@@ -942,31 +938,6 @@ async def export_psd(
             result = export_to_psd_a_ocr(
                 source_png_path=source_path,
                 out_path=out_path,
-                ocr=ocr_result,
-                color_space=color_space,  # type: ignore[arg-type]
-                dpi=body.dpi,
-            )
-        elif tier == "B":
-            segmentation = await run_segmentation(source_path.read_bytes())
-            result = export_to_psd_tier_b(
-                source_png_path=source_path,
-                out_path=out_path,
-                segmentation=segmentation,
-                color_space=color_space,  # type: ignore[arg-type]
-                dpi=body.dpi,
-            )
-        else:  # tier == "C"
-            segmentation = await run_segmentation(source_path.read_bytes())
-            try:
-                ocr_result = ocr_extract(source_path.read_bytes())
-            except OcrUnavailableError as exc:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-                ) from exc
-            result = export_to_psd_tier_c(
-                source_png_path=source_path,
-                out_path=out_path,
-                segmentation=segmentation,
                 ocr=ocr_result,
                 color_space=color_space,  # type: ignore[arg-type]
                 dpi=body.dpi,
@@ -993,19 +964,12 @@ async def export_psd(
         "tier": result.tier,
         "layer_count": result.layer_count,
     }
-    if segmentation is not None:
-        payload_extra["segmentation_provider"] = segmentation.provider
-        payload_extra["segmentation_model"] = segmentation.model
-        payload_extra["mask_count"] = len(segmentation.masks)
-        # When SAM 3.x runs text-prompted, surface the labels found so the
-        # audit row records *what* the model identified, not just the count.
-        labelled = [m.label for m in segmentation.masks if m.label]
-        if labelled:
-            payload_extra["mask_labels"] = labelled
     if ocr_result is not None:
         payload_extra["text_region_count"] = len(ocr_result.regions)
         payload_extra["ocr_lang"] = ocr_result.lang
 
+    # Audit event slug: "a" → tier_a, "a+ocr" → tier_a_ocr (FS-friendly).
+    tier_slug = result.tier.lower().replace("+", "_")
     asset = save_export(
         session,
         workspace,
@@ -1013,11 +977,11 @@ async def export_psd(
         out_path=result.path,
         mime_type="image/vnd.adobe.photoshop",
         payload_extra=payload_extra,
-        audit_event=f"export.psd.tier_{result.tier.lower()}.created",
+        audit_event=f"export.psd.tier_{tier_slug}.created",
     )
 
-    # Register the sidecar JSON (Tier C only) as a separate audit row so
-    # downstream automations can find it via the audit trail.
+    # Register the OCR sidecar (Tier A+OCR only) as a separate audit row
+    # so downstream automations can find it via the audit trail.
     sidecar_url = None
     if result.sidecar_path is not None and result.sidecar_path.exists():
         try:
@@ -1028,7 +992,7 @@ async def export_psd(
                 out_path=result.sidecar_path,
                 mime_type="application/json",
                 payload_extra={"of_psd_asset_id": asset.id, "kind": "ocr_sidecar"},
-                audit_event="export.psd.tier_c.sidecar_saved",
+                audit_event="export.psd.ocr_sidecar.saved",
             )
             sidecar_url = f"/api/packaging/workspaces/{workspace.slug}/assets/{sidecar_asset.id}/file"
         except ValueError:
@@ -1054,7 +1018,6 @@ async def export_psd(
         height=result.height,
         layer_count=result.layer_count,
         sidecar_url=sidecar_url,
-        segmentation_provider=segmentation.provider if segmentation else None,
         text_layer_count=(
             len(ocr_result.regions) if ocr_result is not None else None
         ),

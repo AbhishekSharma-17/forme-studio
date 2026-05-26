@@ -180,117 +180,6 @@ export function SettingsForm({ initial }: Props) {
             </div>
           </div>
 
-          <div>
-            <Label htmlFor="seg-prov" hint="SAM-2 for layered PSD (Tier B)">
-              Segmentation provider
-            </Label>
-            <Select
-              id="seg-prov"
-              value={String(v("segmentation_provider", snapshot.segmentation_provider))}
-              onChange={(e) =>
-                update(
-                  "segmentation_provider",
-                  e.target.value as
-                    | "replicate"
-                    | "self_hosted"
-                    | "sam3"
-                    | "none",
-                )
-              }
-            >
-              <option value="none">Off — skip layered PSD</option>
-              <option value="replicate">
-                Replicate SAM-2 — paid (~$0.01/img)
-                {snapshot.replicate_api_token.set ? "" : "  (no token)"}
-              </option>
-              <option value="self_hosted">
-                Self-hosted (generic SAM-2/3 contract)
-                {snapshot.segmentation_self_hosted_url ? "" : "  (URL missing)"}
-              </option>
-              <option value="sam3">
-                SAM 3.1 self-hosted — image, concept-promptable
-                {snapshot.sam3_endpoint_present ? "" : "  (URL missing)"}
-              </option>
-            </Select>
-            <p className="mt-1.5 text-xs text-ink-500">
-              <strong>SAM 3.1</strong> returns labelled, scored masks when
-              you provide a concept prompt — Tier B PSD layers become{" "}
-              <code className="font-mono">logo</code>,{" "}
-              <code className="font-mono">wordmark</code>, …{" "}
-              instead of <code className="font-mono">sam2_layer_01</code>.
-              See <code className="font-mono">docs/SAM_UPGRADE.md</code> for
-              the wire contract your DGX endpoint must implement.
-            </p>
-          </div>
-
-          <div>
-            <Label htmlFor="seg-url" hint="Generic SAM-2/3 wire contract">
-              Self-hosted segmentation URL
-            </Label>
-            <Input
-              id="seg-url"
-              type="url"
-              placeholder="https://your-dgx-spark:9000/segment"
-              value={String(
-                v(
-                  "segmentation_self_hosted_url",
-                  snapshot.segmentation_self_hosted_url ?? "",
-                ),
-              )}
-              onChange={(e) => update("segmentation_self_hosted_url", e.target.value)}
-            />
-            <p className="mt-1.5 text-xs text-ink-500">
-              The bearer token (if any) lives in{" "}
-              <code className="font-mono">FORME_SEGMENTATION_SELF_HOSTED_TOKEN</code>{" "}
-              — edit it directly in <code className="font-mono">.env</code>.
-            </p>
-          </div>
-
-          <div>
-            <Label htmlFor="sam3-url" hint="SAM 3.1 image inference endpoint">
-              SAM 3.1 endpoint URL
-            </Label>
-            <Input
-              id="sam3-url"
-              type="url"
-              placeholder="https://your-dgx-spark:9000/sam3/image"
-              value={String(
-                v("sam3_endpoint_url", snapshot.sam3_endpoint_url ?? ""),
-              )}
-              onChange={(e) => update("sam3_endpoint_url", e.target.value)}
-            />
-            <p className="mt-1.5 text-xs text-ink-500">
-              Bearer token in{" "}
-              <code className="font-mono">FORME_SAM3_ENDPOINT_TOKEN</code> — edit
-              in <code className="font-mono">.env</code>. Required when{" "}
-              <em>Segmentation provider</em> is set to{" "}
-              <code className="font-mono">sam3</code>.
-            </p>
-          </div>
-
-          <div>
-            <Label
-              htmlFor="sam3-prompt"
-              hint="Comma-separated concepts — leave blank for AMG (anonymous masks)"
-            >
-              SAM 3.1 concept prompt
-            </Label>
-            <Input
-              id="sam3-prompt"
-              type="text"
-              placeholder="logo, wordmark, bottle, label background"
-              value={String(
-                v("sam3_text_prompt", snapshot.sam3_text_prompt ?? ""),
-              )}
-              onChange={(e) => update("sam3_text_prompt", e.target.value)}
-            />
-            <p className="mt-1.5 text-xs text-ink-500">
-              When set, SAM 3.1 runs in <em>text mode</em> and returns one
-              mask per detected instance, named with the matched concept.
-              Blank ⇒ automatic-mask-generation (every shape, anonymous
-              names).
-            </p>
-          </div>
         </CardBody>
       </Card>
 
@@ -354,63 +243,30 @@ export function SettingsForm({ initial }: Props) {
         </CardBody>
       </Card>
 
-      {/* ─── PSD tiers (B + C) ─── */}
+      {/* ─── Tier A+OCR (editable text overlays) ─── */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <Layers size={16} className="text-clay-600" />
-            <CardTitle>PSD tiers</CardTitle>
+            <CardTitle>Tier A+OCR · editable text layers</CardTitle>
           </div>
           <Badge tone={snapshot.tier_c_enabled ? "sage" : "neutral"}>
-            Tier C {snapshot.tier_c_enabled ? "on" : "off"}
+            {snapshot.tier_c_enabled ? "on" : "off"}
           </Badge>
         </CardHeader>
         <CardBody className="space-y-5">
           <div>
-            <Label htmlFor="sam2" hint="Replicate model identifier or version hash">
-              SAM-2 model (Replicate)
-            </Label>
-            <Input
-              id="sam2"
-              value={String(v("replicate_sam2_model", snapshot.replicate_sam2_model))}
-              onChange={(e) => update("replicate_sam2_model", e.target.value)}
-              placeholder="meta/sam-2"
-            />
-            <p className="mt-1.5 text-xs text-ink-500">
-              Powers Tier B layered PSD. Override if you want a community port
-              or a pinned version hash.
-            </p>
-          </div>
-
-          <div>
-            <Label htmlFor="seg-timeout" hint="Per SAM-2 request">
-              Segmentation timeout (seconds)
-            </Label>
-            <Input
-              id="seg-timeout"
-              type="number"
-              min={10}
-              max={600}
-              step={5}
-              value={Number(
-                v("segmentation_timeout_s", snapshot.segmentation_timeout_s),
-              )}
-              onChange={(e) =>
-                update("segmentation_timeout_s", Number(e.target.value))
-              }
-            />
-          </div>
-
-          <div className="border-t border-ink-200/70 pt-4">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <div className="text-sm font-medium text-ink-800">
-                  Tier C — editable text layers
+                  Enable Tier A+OCR exports
                 </div>
                 <p className="text-xs text-ink-500 mt-0.5 max-w-md">
-                  Layers Tier B + adds Tesseract-OCR'd text regions as
-                  named layers + a JSON sidecar. Off by default — toggle
-                  on after verifying Tesseract is installed below.
+                  Adds Tesseract-OCR'd text regions as named layers on
+                  top of the flat PSD + a JSON sidecar. Off by default —
+                  toggle on after verifying Tesseract is installed below.
+                  For a fully multi-layered editable PSD, use the{" "}
+                  <em>Composable</em> option in the PSD dropdown.
                 </p>
               </div>
               <label className="relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center">
@@ -427,7 +283,7 @@ export function SettingsForm({ initial }: Props) {
           </div>
 
           <div>
-            <Label htmlFor="tess-cmd" hint="Used for Tier C OCR">
+            <Label htmlFor="tess-cmd" hint="Used for OCR text extraction">
               Tesseract CLI path
             </Label>
             <div className="flex items-center gap-3">
@@ -727,7 +583,6 @@ export function SettingsForm({ initial }: Props) {
         </CardHeader>
         <CardBody className="space-y-3">
           <SecretRow label="OPENAI_API_KEY" secret={snapshot.openai_api_key} />
-          <SecretRow label="REPLICATE_API_TOKEN" secret={snapshot.replicate_api_token} />
           <SecretRow
             label="VECTORIZER_AI_API_ID"
             secret={snapshot.vectorizer_ai_api_id}
@@ -735,14 +590,6 @@ export function SettingsForm({ initial }: Props) {
           <SecretRow
             label="VECTORIZER_AI_API_KEY"
             secret={snapshot.vectorizer_ai_api_key}
-          />
-          <SecretRow
-            label="FORME_SEGMENTATION_SELF_HOSTED_TOKEN"
-            secret={snapshot.segmentation_self_hosted_token}
-          />
-          <SecretRow
-            label="FORME_SAM3_ENDPOINT_TOKEN"
-            secret={snapshot.sam3_endpoint_token}
           />
           <SecretRow
             label="CLOUDCONVERT_API_KEY"

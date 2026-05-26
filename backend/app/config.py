@@ -51,9 +51,6 @@ class Settings(BaseSettings):
         description="vectorizer.ai billing mode: production | test | preview.",
     )
 
-    # Replicate-hosted SAM-2 (one option for segmentation).
-    replicate_api_token: str | None = Field(None, alias="REPLICATE_API_TOKEN")
-
     # --- Provider selection (configurable; fallback is NOT automatic) ---
     vectorizer_provider: str = Field(
         "vectorizer_ai",
@@ -69,68 +66,13 @@ class Settings(BaseSettings):
         ),
     )
 
-    segmentation_provider: str = Field(
-        "replicate",
-        alias="FORME_SEGMENTATION_PROVIDER",
-        description=(
-            "'replicate' (SAM-2 hosted, default) | "
-            "'self_hosted' (generic SAM-2/SAM-3 wire contract) | "
-            "'sam3' (SAM 3.1 self-hosted, richer schema with label + score) | "
-            "'none'."
-        ),
-    )
-    segmentation_self_hosted_url: str | None = Field(
-        None,
-        alias="FORME_SEGMENTATION_SELF_HOSTED_URL",
-        description="HTTPS endpoint for a generic SAM (v2/v3) deployment.",
-    )
-    segmentation_self_hosted_token: str | None = Field(
-        None,
-        alias="FORME_SEGMENTATION_SELF_HOSTED_TOKEN",
-        description="Optional bearer token for the generic self-hosted endpoint.",
-    )
-    # --- SAM 3.1 self-hosted (image only) -------------------------------
-    # Separate URL/token slots so users can keep a SAM-2 deployment running
-    # in parallel with their new SAM 3.1 box during the cutover.
-    sam3_endpoint_url: str | None = Field(
-        None,
-        alias="FORME_SAM3_ENDPOINT_URL",
-        description=(
-            "HTTPS endpoint for your SAM 3.1 image inference service. "
-            "Contract: POST <URL> multipart with 'image' (PNG bytes); "
-            "response JSON {width, height, model, masks: [{png_b64, "
-            "bbox: [x1,y1,x2,y2], area_px, score?, label?}]}. "
-            "score + label are optional — label is set when the model is "
-            "text-prompted so Tier B PSDs can name layers semantically."
-        ),
-    )
-    sam3_endpoint_token: str | None = Field(
-        None,
-        alias="FORME_SAM3_ENDPOINT_TOKEN",
-        description="Optional bearer token for the SAM 3.1 endpoint.",
-    )
-    sam3_text_prompt: str | None = Field(
-        None,
-        alias="FORME_SAM3_TEXT_PROMPT",
-        description=(
-            "Optional comma-separated concepts to ask SAM 3.1 to segment "
-            "(e.g. 'logo, wordmark, bottle'). When unset, the endpoint "
-            "should run automatic mask generation."
-        ),
-    )
-
-    # Replicate model identifier for SAM-2 automatic mask generation.
-    # Override if you want a community port or a pinned version hash.
-    replicate_sam2_model: str = Field(
-        "meta/sam-2",
-        alias="FORME_REPLICATE_SAM2_MODEL",
-    )
-
-    # Tier C controls (OCR-driven editable text layers).
+    # OCR controls (Tesseract-driven editable text layers for Tier A+OCR).
+    # The env var name remains FORME_TIER_C_ENABLED for back-compat; semantically
+    # it now gates the only OCR pipeline (A+OCR) since Tier C was removed.
     tier_c_enabled: bool = Field(
         False,
         alias="FORME_TIER_C_ENABLED",
-        description="Allow Tier C PSD exports (SAM-2 + Tesseract OCR).",
+        description="Allow OCR-augmented PSD exports (Tier A+OCR via Tesseract).",
     )
     tesseract_cmd: str = Field(
         "tesseract",
@@ -141,11 +83,6 @@ class Settings(BaseSettings):
         "eng",
         alias="FORME_TESSERACT_LANG",
         description="Comma-separated language codes (e.g. 'eng', 'eng+spa').",
-    )
-
-    # Max time we'll wait on a single segmentation call.
-    segmentation_timeout_s: float = Field(
-        180.0, alias="FORME_SEGMENTATION_TIMEOUT_S", ge=10.0, le=600.0
     )
 
     # Max time we'll wait for a single vector-export call (network or CLI).

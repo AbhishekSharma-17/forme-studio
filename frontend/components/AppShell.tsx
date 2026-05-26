@@ -97,8 +97,8 @@ export async function AppShell({ children }: AppShellProps) {
                   }
                 />
                 <Capability
-                  label={`Segmentation → ${labelForSegmentation(health!.providers.segmentation)}`}
-                  on={isSegmentationReady(health!)}
+                  label="Tesseract OCR"
+                  on={health!.capabilities.tesseract}
                 />
                 {health!.capabilities.cdr_enabled && (
                   <Capability
@@ -168,27 +168,10 @@ function labelForVectorizer(p: "vectorizer_ai" | "inkscape_potrace"): string {
   return p === "vectorizer_ai" ? "Vectorizer.AI" : "Inkscape Potrace";
 }
 
-function labelForSegmentation(
-  p: import("@/lib/api").SegmentationProvider,
-): string {
-  if (p === "replicate") return "Replicate SAM-2";
-  if (p === "self_hosted") return "self-hosted SAM";
-  if (p === "sam3") return "SAM 3.1 (self-hosted)";
-  return "off";
-}
-
 function isVectorizerReady(h: import("@/lib/api").Health): boolean {
   const p = h.providers.vectorizer_primary;
   if (p === "vectorizer_ai") return h.capabilities.vectorizer_ai;
   if (p === "inkscape_potrace") return h.capabilities.inkscape;
-  return false;
-}
-
-function isSegmentationReady(h: import("@/lib/api").Health): boolean {
-  const p = h.providers.segmentation;
-  if (p === "replicate") return h.capabilities.segmentation_replicate;
-  if (p === "self_hosted") return h.capabilities.segmentation_self_hosted;
-  if (p === "sam3") return h.capabilities.segmentation_sam3;
   return false;
 }
 

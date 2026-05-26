@@ -39,11 +39,8 @@ def test_get_settings_returns_full_snapshot_with_redacted_secrets(
     # Every secret field is a SecretField, NOT the raw value
     for key in (
         "openai_api_key",
-        "replicate_api_token",
         "vectorizer_ai_api_id",
         "vectorizer_ai_api_key",
-        "segmentation_self_hosted_token",
-        "sam3_endpoint_token",
         "cloudconvert_api_key",
         "cloudconvert_sandbox_api_key",
     ):
@@ -54,7 +51,6 @@ def test_get_settings_returns_full_snapshot_with_redacted_secrets(
     # In CI all creds are scrubbed → every secret reads as not-set, no preview
     for key in (
         "openai_api_key",
-        "replicate_api_token",
         "vectorizer_ai_api_id",
         "vectorizer_ai_api_key",
         "cloudconvert_api_key",
@@ -125,32 +121,6 @@ def test_patch_settings_round_trip_vectorizer_provider(
         settings_module._env_file_path = original_env_path
 
 
-def test_patch_settings_writes_sam3_endpoint_url(
-    client: TestClient, isolated_paths: Path, tmp_path: Path
-) -> None:
-    """SAM 3.1 fields are in the allowlist — verify PATCH writes the URL."""
-    env_file = tmp_path / "test.env"
-    env_file.write_text("# initial\n")
-    import app.routes.settings as settings_module
-    settings_module._env_file_path = lambda: env_file  # type: ignore[assignment]
-    try:
-        res = client.patch(
-            "/api/settings",
-            json={
-                "sam3_endpoint_url": "https://dgx.local/sam3/image",
-                "sam3_text_prompt": "logo, bottle, wordmark",
-            },
-        )
-        assert res.status_code == 200, res.text
-        content = env_file.read_text()
-        assert "FORME_SAM3_ENDPOINT_URL=https://dgx.local/sam3/image" in content
-        assert "FORME_SAM3_TEXT_PROMPT=logo, bottle, wordmark" in content
-    finally:
-        # Restore via reimport to avoid leaking the lambda into other tests.
-        import importlib
-        importlib.reload(settings_module)
-
-
 def test_patch_settings_writes_cdr_toggle_and_provider(
     client: TestClient, isolated_paths: Path, tmp_path: Path
 ) -> None:
@@ -194,32 +164,6 @@ def test_patch_settings_validates_vectorizer_ai_mode_literal(
     assert res.status_code == 422
 
 
-def test_patch_settings_validates_segmentation_provider_literal(
-    client: TestClient, isolated_paths: Path, tmp_path: Path
-) -> None:
-    """segmentation_provider only accepts replicate/self_hosted/sam3/none.
-
-    The valid-case path writes to disk — point at a tmp env file so we
-    don't clobber the real backend/.env.
-    """
-    env_file = tmp_path / "test.env"
-    env_file.write_text("# initial\n")
-    import app.routes.settings as settings_module
-    settings_module._env_file_path = lambda: env_file  # type: ignore[assignment]
-    try:
-        # Valid sam3 → 200, writes to tmp env_file
-        ok = client.patch("/api/settings", json={"segmentation_provider": "sam3"})
-        assert ok.status_code == 200, ok.text
-        assert "FORME_SEGMENTATION_PROVIDER=sam3" in env_file.read_text()
-
-        # Invalid value → 422 (pydantic literal validation), no write
-        bad = client.patch("/api/settings", json={"segmentation_provider": "foo"})
-        assert bad.status_code == 422
-    finally:
-        import importlib
-        importlib.reload(settings_module)
-
-
 def test_patch_settings_clamps_timeouts(
     client: TestClient, isolated_paths: Path, tmp_path: Path
 ) -> None:
@@ -253,7 +197,7 @@ def test_patch_settings_clamps_timeouts(
 # ------------------------------------------------------- writable allow-list
 
 
-def test_writable_keys_covers_all_new_slice_6_7_fields() -> None:
+def test_writable_keys_covers_all_active_fields() -> None:
     """Regression guard: every env-var we expose in the dashboard must be
     in WRITABLE_KEYS, otherwise the PATCH silently drops it."""
     required = {
@@ -262,9 +206,6 @@ def test_writable_keys_covers_all_new_slice_6_7_fields() -> None:
         "FORME_VECTORIZER_FALLBACK",
         "FORME_VECTORIZER_AI_MODE",
         "FORME_VECTORIZER_TIMEOUT_S",
-        # slice 6.5 — SAM 3.1
-        "FORME_SAM3_ENDPOINT_URL",
-        "FORME_SAM3_TEXT_PROMPT",
         # slice 7 — CDR
         "FORME_CDR_ENABLED",
         "FORME_CDR_PROVIDER",
@@ -272,6 +213,10 @@ def test_writable_keys_covers_all_new_slice_6_7_fields() -> None:
         "FORME_CDR_TIMEOUT_S",
         "FORME_CLOUDCONVERT_SANDBOX",
         "FORME_UNICONVERTOR_PATH",
+        # Tier A+OCR (env name kept for back-compat)
+        "FORME_TIER_C_ENABLED",
+        "FORME_TESSERACT_CMD",
+        "FORME_TESSERACT_LANG",
     }
     missing = required - set(WRITABLE_KEYS)
     assert not missing, f"Missing from WRITABLE_KEYS: {missing}"

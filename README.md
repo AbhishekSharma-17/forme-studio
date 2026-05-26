@@ -46,8 +46,8 @@ Open <http://localhost:2002> → **+ New workspace** → write a brief →
   rules; what to use when extending the UI.
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — why modules, why frozen
   specs, why audit-on-disk.
-- **[SETUP_KEYS.md](docs/SETUP_KEYS.md)** — where to get OpenAI,
-  Replicate, Vectorizer.AI credentials.
+- **[SETUP_KEYS.md](docs/SETUP_KEYS.md)** — where to get OpenAI and
+  Vectorizer.AI credentials.
 
 ---
 
@@ -58,10 +58,11 @@ Open <http://localhost:2002> → **+ New workspace** → write a brief →
 | Backend     | FastAPI · SQLModel · SQLite · uv · structlog      |
 | Frontend    | Next.js 14 App Router · Tailwind v3 · TypeScript  |
 | AI gen      | OpenAI **gpt-image-2** (SSE partial-image stream) |
-| Segmentation| Replicate SAM-2 *or* your own self-hosted DGX     |
+| Vision      | GPT-4o-mini (element discovery for composable PSD)|
+| OCR         | Tesseract (local) for Tier A+OCR text overlays    |
 | Vector      | Vectorizer.AI (primary) · Inkscape Potrace (free) |
 | PSD writer  | psd-tools 1.17 + Pillow                           |
-| CDR writer  | Inkscape CLI (post-MVP)                           |
+| CDR writer  | CloudConvert · UniConvertor 2 (sK1, local)        |
 | Storage     | Local filesystem (`./workspaces/<slug>/...`)      |
 
 Backend port: **8002** · Frontend port: **2002**.
@@ -99,30 +100,22 @@ Backend port: **8002** · Frontend port: **2002**.
   button on every variant tile and gallery card, edit-mode banner +
   read-only "Original brief" caption, 16-ref cap enforced client-side
 
-### Slice 4 — Tier A flat PSD export
+### Slice 4 — PSD export (Tier A flat + Tier A+OCR + Composable)
 - `app/services/export_psd.py`: PNG → CMYK (Pillow baseline) → PSD via
   `psd-tools`, 300 DPI baked into the PSD Resolution Info image resource
 - `POST /workspaces/{slug}/exports/psd` — body
   `{source_asset_id, tier, color_space: CMYK|RGB, dpi}`
 - `Asset(kind="export")` + `export.psd.tier_<x>.created` audit per tier
-- UI: **PSD ▾** split-button: one click for Tier A flat, dropdown for B/C
-
-### Slice 4.5 — Tier B + Tier C PSD
-- **Tier B (layered)** — SAM-2 segmentation → per-mask alpha overlay
-  layers on top of the base. Designers toggle visibility in Photoshop.
-- **Tier C (editable text)** — Tier B + Tesseract OCR per-word overlays
-  whose layer names encode the detected text. Also writes a sidecar
-  `<filename>.ocr.json` listing every region with bbox + confidence.
-- **Segmentation providers** (configurable, non-auto fallback):
-  - `replicate` — meta/sam-2 (default), uses `REPLICATE_API_TOKEN`
-  - `self_hosted` — your DGX Spark; multipart contract documented in
-    `app/services/segmentation.py`
-- **OCR**: local Tesseract via `pytesseract` (`brew install tesseract`).
-  Configurable command path + languages. Tier C also requires
-  `FORME_TIER_C_ENABLED=true`.
-- UI: PSD button is a split with a dropdown — Tier A always available,
-  Tier B/C grey out when their providers aren't ready, hint copy points
-  to Settings for the fix.
+- **Tier A (flat)** — single CMYK layer at 300 DPI. Always available.
+- **Tier A+OCR (editable text)** — flat base + one Tesseract-OCR'd layer
+  per detected text region (layer name encodes the text + position) + a
+  sidecar `<filename>.ocr.json` listing every region with bbox +
+  confidence. Requires `FORME_TIER_C_ENABLED=true` and Tesseract on PATH.
+- **Composable** — for fully multi-layered editable output: every
+  visual element is regenerated on a transparent canvas and assembled
+  by name into a layered PSD. See the Composable section below.
+- UI: **PSD ▾** split-button — Tier A on the main click, dropdown for
+  A+OCR + Composable. Greys out unavailable tiers with hint copy.
 
 ### Slice 5 — Print PDF/X-4
 - **`app/services/export_pdf.py`** — ReportLab-based PDF/X-4 generator:
@@ -137,7 +130,7 @@ Backend port: **8002** · Frontend port: **2002**.
 - Settings: new **Print PDF/X-4** card with ICC path + name + green/amber present indicator
 
 ### Slice 6 — Vector exports (PNG → SVG)
-- **`app/services/vector.py`** — dispatcher with the same non-auto-fallback contract as `segmentation.py`:
+- **`app/services/vector.py`** — provider dispatcher with the same non-auto-fallback contract Forme uses everywhere:
   - `vectorizer_ai` — POSTs the PNG to `https://vectorizer.ai/api/v1/vectorize` (HTTP-Basic with `VECTORIZER_AI_API_ID` / `_KEY`). Honours `FORME_VECTORIZER_AI_MODE` (`production` · `test` · `preview`).
   - `inkscape_potrace` — shells out to `inkscape --actions="select-all;trace-bitmap;export-filename:…;export-do;FileQuit"` (Inkscape 1.2+).
   - Errors surface as 502/503/504 with the upstream message in `detail` — the UI shows them and offers a "Try with <fallback>?" button; the backend **never** retries the alternate provider automatically.
@@ -146,12 +139,24 @@ Backend port: **8002** · Frontend port: **2002**.
 - UI: clay-coloured **SVG** button (icon: `Shapes`) on every variant tile and gallery card. On vector-export failure, the Exports section renders the upstream error plus a one-click *"Try with Vectorizer.AI"* / *"Try with Inkscape Potrace"* affordance — exactly one alternate, never auto-invoked. Exports list distinguishes SVG by colour + icon.
 - Settings: Provider routing card now exposes Vectorizer.AI **mode** (`production` / `test` / `preview`) and a shared vector-timeout field; per-stage availability hints flag missing creds (e.g. "no key") and missing tools (e.g. "not installed").
 
-### Slice 6.5 — SAM 3.1 self-hosted segmentation
-- New `sam3` segmentation provider — image-only, self-hosted (your DGX Spark). Default stays Replicate SAM-2; flip in Settings → Provider routing → Segmentation provider once your endpoint is up.
-- New env vars: `FORME_SAM3_ENDPOINT_URL`, `FORME_SAM3_ENDPOINT_TOKEN`, optional `FORME_SAM3_TEXT_PROMPT` for concept-based segmentation.
-- **Semantic Tier B PSDs** — when SAM 3.1 is text-prompted, masks come back with `label` ("logo", "bottle", …) and `score`. Forme propagates the label to the PSD layer name (with `_1` / `_2` disambiguation for duplicates) so designers see real names in Photoshop instead of `sam2_layer_01`. AMG mode without a prompt still works and falls back to anonymous `sam3_layer_NN` names.
-- Wire contract for the user's DGX endpoint is documented in [`docs/SAM_UPGRADE.md`](docs/SAM_UPGRADE.md) — same multipart POST shape as the existing self-hosted slot, with optional `score` + `label` per mask.
-- Audit: `export.psd.tier_b.created` payload now carries `mask_labels` when SAM 3.x returned them.
+### Composable PSD — multi-layered editable export
+- **`app/services/vision.py`** — GPT-4o-mini analyses the approved
+  whole-sticker generation and returns a JSON manifest of detected
+  visual elements (logos, wordmarks, illustrations, ornaments) with
+  positions in mm + a suggested prompt per element.
+- **`app/services/compose.py`** — fans out one gpt-image-2 call per
+  element with `background="transparent"`, then assembles all results
+  by name + position into a multi-layered CMYK PSD. Every element is
+  its own editable Photoshop layer; designers can swap, move, restyle
+  individually without re-rendering the whole sticker.
+- `POST /workspaces/{slug}/compose/discover` returns the manifest;
+  `POST /workspaces/{slug}/exports/psd-composable` runs the
+  per-element generation + assembly.
+- UI: **Composable** entry in the PSD ▾ menu opens a review dialog —
+  user edits prompts, removes/adds elements, picks quality, hits
+  *Generate + assemble*. Each generated element lands as its own
+  `Asset(kind="generation")`; the assembled PSD lands as
+  `Asset(kind="export")` with `export.psd.composable.created` audit.
 
 ### Slice 7 — CDR export (CorelDRAW)
 - **`app/services/export_cdr.py`** — dispatcher mirroring slice 6:
@@ -166,8 +171,8 @@ Backend port: **8002** · Frontend port: **2002**.
 ### Configurable provider architecture
 - `FORME_VECTORIZER_PROVIDER` / `_FALLBACK` — Vectorizer.AI ↔ Inkscape
   Potrace. Fallback is **never** auto-invoked.
-- `FORME_SEGMENTATION_PROVIDER` — `replicate` / `self_hosted` / `none`.
-  Self-hosted slot reserved for the DGX Spark deployment.
+- `FORME_CDR_PROVIDER` / `_FALLBACK` — CloudConvert ↔ UniConvertor.
+  Same non-auto-fallback discipline.
 - `/settings` dashboard: read every env-derived setting (secrets
   redacted to last 4 chars), toggle non-secret fields, writes back to
   `backend/.env` and triggers worker reload.
@@ -176,15 +181,15 @@ Backend port: **8002** · Frontend port: **2002**.
 
 ## Provider matrix
 
-| Stage          | Paid primary       | Free / alt                       | Status                |
-| -------------- | ------------------ | -------------------------------- | --------------------- |
-| Image gen/edit | gpt-image-2 (only) | —                                | live ✓                |
-| Segmentation   | Replicate SAM-2    | self-hosted (SAM-2 or SAM 3.1)   | live ✓ (Tier B PSD)   |
-| OCR (Tier C)   | Tesseract (local)  | —                                | live ✓ — toggle on    |
-| Print PDF/X-4  | ReportLab + ICC    | —                                | live ✓                |
-| Vector         | Vectorizer.AI      | Inkscape Potrace                 | live ✓ (slice 6)      |
-| PSD            | psd-tools (local)  | —                                | Tier A · B · C live ✓ |
-| CDR            | CloudConvert       | UniConvertor (sK1, local)        | live ✓ (slice 7)      |
+| Stage          | Paid primary       | Free / alt                       | Status                          |
+| -------------- | ------------------ | -------------------------------- | ------------------------------- |
+| Image gen/edit | gpt-image-2 (only) | —                                | live ✓                          |
+| Vision (compose) | GPT-4o-mini      | —                                | live ✓ (Composable PSD)         |
+| OCR            | Tesseract (local)  | —                                | live ✓ — toggle on              |
+| Print PDF/X-4  | ReportLab + ICC    | —                                | live ✓                          |
+| Vector         | Vectorizer.AI      | Inkscape Potrace                 | live ✓                          |
+| PSD            | psd-tools (local)  | —                                | Tier A · A+OCR · Composable ✓   |
+| CDR            | CloudConvert       | UniConvertor (sK1, local)        | live ✓                          |
 
 ---
 
@@ -202,12 +207,12 @@ forme-studio/
 │   │   ├── models/          ← Workspace · AuditEvent · Asset
 │   │   ├── services/        ← filesystem · audit · pricing · ocr
 │   │   │                       openai_image · export_psd · export_pdf
-│   │   │                       export_cdr · vector · segmentation
+│   │   │                       export_cdr · vector · vision · compose
 │   │   │                       image_normalize · assets
 │   │   ├── modules/
 │   │   │   └── packaging/   ← routes · schemas · presets
 │   │   └── routes/          ← health · settings
-│   └── tests/               ← 77 pytests (hermetic, stubbed OpenAI)
+│   └── tests/               ← 155 pytests (hermetic, stubbed OpenAI)
 ├── frontend/                Next.js 14
 │   ├── app/
 │   │   ├── page.tsx                       Landing
@@ -243,23 +248,21 @@ forme-studio/
 
 ## Verification matrix
 
-| Check          | Command                                  | Result |
-| -------------- | ---------------------------------------- | ------ |
-| Lint           | `uv run ruff check app/ tests/`         | clean  |
-| Type check     | `uv run mypy app/ --strict`             | clean  |
-| Tests          | `uv run pytest -q`                      | 77/77  |
-| Frontend types | `pnpm typecheck`                        | clean  |
+| Check          | Command                                  | Result   |
+| -------------- | ---------------------------------------- | -------- |
+| Lint           | `uv run ruff check app/ tests/`         | clean    |
+| Type check     | `uv run mypy app/ --strict`             | clean    |
+| Tests          | `uv run pytest -q`                      | 155/155  |
+| Frontend types | `pnpm typecheck`                        | clean    |
 
-Pilot is **production-ready** for slices 1–4 against real gpt-image-2
-calls.
+Pilot is **production-ready** against real gpt-image-2 calls.
 
 ---
 
 ## Roadmap
 
-- ✅ **Slice 4.5** — Tier B (SAM-2) + Tier C (OCR) PSD exports
 - ✅ **Slice 5** — Print PDF/X-4 with CMYK ICC + bleed/trim/registration marks
 - ✅ **Slice 6** — Vector exports (Vectorizer.AI primary + Inkscape Potrace fallback, non-auto fallback)
-- ✅ **Slice 6.5** — SAM 3.1 self-hosted segmentation (semantic Tier B PSD layer names)
 - ✅ **Slice 7** — CDR exports (CloudConvert paid + UniConvertor local, non-auto fallback)
+- ✅ **Slice 8** — Tier A+OCR PSD (Tesseract text overlays) + Composable PSD (multi-layered editable export)
 - **Module #2** — Apparel (tee, hoodie, packaging-adjacent print)

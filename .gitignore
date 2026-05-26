@@ -30,7 +30,9 @@ forme.db-wal
 *.db-journal
 *.sqlite
 *.sqlite3
-workspaces/
+# Anchored: only the top-level `workspaces/` data dir, NOT the
+# `frontend/app/workspaces/` Next.js route folder.
+/workspaces/
 
 # --- Python ------------------------------------------------------------------
 __pycache__/

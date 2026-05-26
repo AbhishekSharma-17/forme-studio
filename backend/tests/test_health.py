@@ -20,9 +20,6 @@ def test_health_returns_ok_with_capabilities(client: TestClient) -> None:
     assert caps["openai_image"] is False
     assert caps["vectorizer_ai"] is False
     assert caps["inkscape"] is False
-    assert caps["segmentation_replicate"] is False
-    assert caps["segmentation_self_hosted"] is False
-    assert caps["segmentation_sam3"] is False
     assert "tesseract" in caps
     # CDR caps — master toggle off + no provider creds in CI = all false.
     assert caps["cdr_enabled"] is False
@@ -34,16 +31,13 @@ def test_health_returns_ok_with_capabilities(client: TestClient) -> None:
     assert body["providers"] == {
         "vectorizer_primary": "vectorizer_ai",
         "vectorizer_fallback": "inkscape_potrace",
-        "segmentation": "none",
         "cdr_primary": "cloudconvert",
         "cdr_fallback": "uniconvertor",
     }
 
     # Tier availability — A always true; A+OCR depends on FORME_TIER_C_ENABLED
-    # (off in CI conftest) so it's False; B+C also False (no seg provider).
+    # (off in CI conftest) so it's False.
     assert body["tiers"] == {
         "tier_a": True,
         "tier_a_ocr": False,
-        "tier_b": False,
-        "tier_c": False,
     }

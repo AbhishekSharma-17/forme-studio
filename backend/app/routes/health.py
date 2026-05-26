@@ -28,9 +28,6 @@ class Capabilities(BaseModel):
     vectorizer_ai: bool
     inkscape: bool
     tesseract: bool
-    segmentation_replicate: bool
-    segmentation_self_hosted: bool
-    segmentation_sam3: bool
     cdr_enabled: bool             # master switch (FORME_CDR_ENABLED)
     cdr_cloudconvert: bool        # API key present
     cdr_uniconvertor: bool        # binary present
@@ -40,9 +37,7 @@ class TierAvailability(BaseModel):
     """Which PSD tiers the current configuration can serve right now."""
 
     tier_a: bool      # always true
-    tier_a_ocr: bool  # Tesseract + FORME_TIER_C_ENABLED=true (no seg dep)
-    tier_b: bool      # segmentation provider reachable
-    tier_c: bool      # tier_b + Tesseract + FORME_TIER_C_ENABLED=true
+    tier_a_ocr: bool  # Tesseract + FORME_TIER_C_ENABLED=true
 
 
 class ProvidersSelected(BaseModel):
@@ -54,7 +49,6 @@ class ProvidersSelected(BaseModel):
 
     vectorizer_primary: str
     vectorizer_fallback: str | None
-    segmentation: str  # 'replicate' | 'self_hosted' | 'sam3' | 'none'
     cdr_primary: str  # 'cloudconvert' | 'uniconvertor'
     cdr_fallback: str | None  # same options or None
 
@@ -75,17 +69,6 @@ async def health() -> HealthOut:
     s = get_settings()
     tesseract_present = shutil.which(s.tesseract_cmd) is not None
 
-    # Tier B requires the selected segmentation provider to be reachable.
-    seg_ready: bool
-    if s.segmentation_provider == "replicate":
-        seg_ready = bool(s.replicate_api_token)
-    elif s.segmentation_provider == "self_hosted":
-        seg_ready = bool(s.segmentation_self_hosted_url)
-    elif s.segmentation_provider == "sam3":
-        seg_ready = bool(s.sam3_endpoint_url)
-    else:  # "none"
-        seg_ready = False
-
     return HealthOut(
         version=__version__,
         image_model=s.openai_image_model,
@@ -94,9 +77,6 @@ async def health() -> HealthOut:
             vectorizer_ai=bool(s.vectorizer_ai_api_id and s.vectorizer_ai_api_key),
             inkscape=Path(s.inkscape_path).is_file(),
             tesseract=tesseract_present,
-            segmentation_replicate=bool(s.replicate_api_token),
-            segmentation_self_hosted=bool(s.segmentation_self_hosted_url),
-            segmentation_sam3=bool(s.sam3_endpoint_url),
             cdr_enabled=s.cdr_enabled,
             # `cdr_cloudconvert` reflects the *active* key — sandbox or
             # live, whichever matches the toggle. So the AppShell dot
@@ -110,7 +90,6 @@ async def health() -> HealthOut:
             vectorizer_fallback=(
                 s.vectorizer_fallback if s.vectorizer_fallback != "none" else None
             ),
-            segmentation=s.segmentation_provider,
             cdr_primary=s.cdr_provider,
             cdr_fallback=(
                 s.cdr_fallback if s.cdr_fallback != "none" else None
@@ -118,10 +97,7 @@ async def health() -> HealthOut:
         ),
         tiers=TierAvailability(
             tier_a=True,
-            # A+OCR needs Tesseract + the OCR toggle, but NOT segmentation —
-            # that's the whole point of the tier.
+            # A+OCR needs Tesseract + the OCR toggle.
             tier_a_ocr=tesseract_present and s.tier_c_enabled,
-            tier_b=seg_ready,
-            tier_c=seg_ready and tesseract_present and s.tier_c_enabled,
         ),
     )

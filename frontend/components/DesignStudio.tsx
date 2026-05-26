@@ -7,7 +7,6 @@ import {
   Download,
   FileImage,
   FileText,
-  Layers,
   Loader2,
   PauseCircle,
   Pencil,
@@ -1301,8 +1300,8 @@ function PsdTierMenu({
             label="Tier A+OCR · Editable text"
             description={
               tiers.tier_a_ocr
-                ? "Flat + Tesseract text overlays + .ocr.json sidecar (no SAM-2 needed)"
-                : "Enable Tier C + Tesseract in Settings"
+                ? "Flat + Tesseract text overlays + .ocr.json sidecar"
+                : "Enable Tesseract + Tier A+OCR toggle in Settings"
             }
             icon={<Type size={14} />}
             onClick={() => {
@@ -1311,37 +1310,9 @@ function PsdTierMenu({
             }}
           />
           <TierMenuItem
-            available={tiers.tier_b}
-            label="Tier B · Layered (SAM-2)"
-            description={
-              tiers.tier_b
-                ? "SAM-2 masks as separate layers"
-                : "Enable segmentation in Settings"
-            }
-            icon={<Layers size={14} />}
-            onClick={() => {
-              setOpen(false);
-              if (tiers.tier_b) onPick("B");
-            }}
-          />
-          <TierMenuItem
-            available={tiers.tier_c}
-            label="Tier C · Layered + editable text"
-            description={
-              tiers.tier_c
-                ? "Tier B + OCR'd text overlays + sidecar"
-                : "Needs Tier B + Tier C toggle"
-            }
-            icon={<Type size={14} />}
-            onClick={() => {
-              setOpen(false);
-              if (tiers.tier_c) onPick("C");
-            }}
-          />
-          <TierMenuItem
             available={true}
             label="Composable · Best quality"
-            description="Per-element regeneration (no SAM-2 needed). Opens designer flow."
+            description="Per-element regeneration into a multi-layered editable PSD. Opens designer flow."
             icon={<Sparkles size={14} />}
             onClick={() => {
               setOpen(false);

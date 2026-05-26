@@ -16,9 +16,6 @@ export interface HealthCapabilities {
   vectorizer_ai: boolean;
   inkscape: boolean;
   tesseract: boolean;
-  segmentation_replicate: boolean;
-  segmentation_self_hosted: boolean;
-  segmentation_sam3: boolean;
   cdr_enabled: boolean;
   cdr_cloudconvert: boolean;
   cdr_uniconvertor: boolean;
@@ -27,21 +24,13 @@ export interface HealthCapabilities {
 export interface TierAvailability {
   tier_a: boolean;
   tier_a_ocr: boolean;
-  tier_b: boolean;
-  tier_c: boolean;
 }
 
 export type VectorizerProvider = "vectorizer_ai" | "inkscape_potrace";
-export type SegmentationProvider =
-  | "replicate"
-  | "self_hosted"
-  | "sam3"
-  | "none";
 
 export interface ProvidersSelected {
   vectorizer_primary: VectorizerProvider;
   vectorizer_fallback: VectorizerProvider | null;
-  segmentation: SegmentationProvider;
   cdr_primary: "cloudconvert" | "uniconvertor";
   cdr_fallback: "cloudconvert" | "uniconvertor" | null;
 }
@@ -161,7 +150,7 @@ export interface ReferenceUploadResponse {
   total: number;
 }
 
-export type PsdTier = "A" | "A+OCR" | "B" | "C" | "COMPOSABLE";
+export type PsdTier = "A" | "A+OCR" | "COMPOSABLE";
 
 export interface PsdExportRequest {
   source_asset_id: number;
@@ -180,7 +169,6 @@ export interface PsdExportResponse {
   height: number;
   layer_count: number;
   sidecar_url: string | null;
-  segmentation_provider: string | null;
   text_layer_count: number | null;
 }
 
@@ -314,22 +302,14 @@ export interface SettingsOut {
   workspaces_dir: string;
   db_path: string;
   openai_api_key: SecretField;
-  replicate_api_token: SecretField;
   vectorizer_ai_api_id: SecretField;
   vectorizer_ai_api_key: SecretField;
-  segmentation_self_hosted_token: SecretField;
-  sam3_endpoint_token: SecretField;
   cloudconvert_api_key: SecretField;
   cloudconvert_sandbox_api_key: SecretField;
   vectorizer_provider: "vectorizer_ai" | "inkscape_potrace";
   vectorizer_fallback: "vectorizer_ai" | "inkscape_potrace" | "none" | null;
   vectorizer_ai_mode: "production" | "test" | "preview";
   vectorizer_timeout_s: number;
-  segmentation_provider: SegmentationProvider;
-  segmentation_self_hosted_url: string | null;
-  sam3_endpoint_url: string | null;
-  sam3_endpoint_present: boolean;
-  sam3_text_prompt: string | null;
   openai_image_model: string;
   pricing_markup_percent: number;
   image_generation_timeout_s: number;
@@ -345,8 +325,6 @@ export interface SettingsOut {
   tesseract_cmd: string;
   tesseract_present: boolean;
   tesseract_lang: string;
-  replicate_sam2_model: string;
-  segmentation_timeout_s: number;
   tier_c_enabled: boolean;
   print_icc_path: string;
   print_icc_present: boolean;
@@ -360,10 +338,6 @@ export interface SettingsPatch {
   vectorizer_fallback?: "vectorizer_ai" | "inkscape_potrace" | "none";
   vectorizer_ai_mode?: "production" | "test" | "preview";
   vectorizer_timeout_s?: number;
-  segmentation_provider?: SegmentationProvider;
-  segmentation_self_hosted_url?: string;
-  sam3_endpoint_url?: string;
-  sam3_text_prompt?: string;
   pricing_markup_percent?: number;
   openai_image_model?: string;
   image_generation_timeout_s?: number;
@@ -376,8 +350,6 @@ export interface SettingsPatch {
   cloudconvert_sandbox?: boolean;
   log_level?: "debug" | "info" | "warning" | "error";
   tier_c_enabled?: boolean;
-  replicate_sam2_model?: string;
-  segmentation_timeout_s?: number;
   tesseract_cmd?: string;
   tesseract_lang?: string;
   print_icc_path?: string;
