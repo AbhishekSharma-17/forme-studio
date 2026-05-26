@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { ComposeDialog } from "@/components/ComposeDialog";
 import { ReferencesPanel } from "@/components/ReferencesPanel";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -107,6 +108,8 @@ export function DesignStudio({
   const [generations, setGenerations] = useState<Asset[]>(initialGenerations);
   const [references, setReferences] = useState<Asset[]>(initialReferences);
   const [exports, setExports] = useState<Asset[]>(initialExports);
+  // Compose-dialog state — when set, the modal opens for that asset.
+  const [composingAsset, setComposingAsset] = useState<Asset | null>(null);
   const [exporting, setExporting] = useState<Record<number, boolean>>({});
   const [exportError, setExportError] = useState<string | null>(null);
   // After a vector export fails, surface a "Try with <fallback>?" affordance
@@ -265,6 +268,12 @@ export function DesignStudio({
     tier: PsdTier = "A",
     colorSpace: "CMYK" | "RGB" = "CMYK",
   ) {
+    // Composable is interactive (multi-step dialog), not a direct export.
+    // Intercept before any API call and open the dialog instead.
+    if (tier === "COMPOSABLE") {
+      setComposingAsset(asset);
+      return;
+    }
     if (exporting[asset.id]) return;
     setExporting((prev) => ({ ...prev, [asset.id]: true }));
     setExportError(null);
@@ -755,6 +764,22 @@ export function DesignStudio({
             <ExportsList workspace={workspace} exports={exports} />
           )}
         </section>
+      )}
+
+      {/* Compose dialog — opens when "Tier Composable" is picked */}
+      {composingAsset && (
+        <ComposeDialog
+          workspace={workspace}
+          sourceAsset={composingAsset}
+          onClose={() => {
+            setComposingAsset(null);
+            // Refresh the exports list so the assembled PSD shows up.
+            api
+              .listAssets(workspace.slug, "export")
+              .then(setExports)
+              .catch(() => undefined);
+          }}
+        />
       )}
     </div>
   );
@@ -1311,6 +1336,16 @@ function PsdTierMenu({
             onClick={() => {
               setOpen(false);
               if (tiers.tier_c) onPick("C");
+            }}
+          />
+          <TierMenuItem
+            available={true}
+            label="Composable · Best quality"
+            description="Per-element regeneration (no SAM-2 needed). Opens designer flow."
+            icon={<Sparkles size={14} />}
+            onClick={() => {
+              setOpen(false);
+              onPick("COMPOSABLE");
             }}
           />
         </div>

@@ -38,7 +38,7 @@ select = ["E", "F", "I", "B", "UP", "N", "RUF"]
 # E501  — line length handled by the formatter
 # B008  — FastAPI's `Depends()` pattern is intentional in defaults
 # RUF002/RUF003 — `×` is the correct character for print dimensions (70 × 100 mm)
-ignore = ["E501", "B008", "RUF002", "RUF003"]
+ignore = ["E501", "B008", "RUF001", "RUF002", "RUF003"]
 
 [tool.mypy]
 python_version = "3.12"

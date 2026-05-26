@@ -24,7 +24,13 @@ from app.modules.packaging.schemas import (
     AssetOut,
     CdrExportRequest,
     CdrExportResponse,
+    ComposeAssembleRequest,
+    ComposeAssembleResponse,
+    ComposeDiscoverRequest,
+    ComposeDiscoverResponse,
+    ComposeElementOut,
     EditRequest,
+    ElementSpecOut,
     GenerateRequest,
     GenerateResponse,
     PackagingPresetOut,
@@ -49,6 +55,12 @@ from app.services.assets import (
     save_export,
     save_generation,
     save_reference,
+)
+from app.services.compose import (
+    GeneratedElement,
+    assemble_composable_psd,
+    derive_composable_filename,
+    generate_element,
 )
 from app.services.export_cdr import (
     convert_svg_to_cdr,
@@ -89,6 +101,7 @@ from app.services.vector import (
 from app.services.vector import (
     vectorize as run_vectorize,
 )
+from app.services.vision import ElementSpec, discover_elements
 
 # Reference-upload guardrails. The model's hard cap is 16 references per
 # call, so we accept up to 16 per *upload* batch too.
@@ -1308,6 +1321,251 @@ async def export_cdr(
         cdr_provider=cdr_result.provider,
         svg_size_bytes=vector_result.size_bytes,
         cdr_size_bytes=cdr_result.size_bytes,
+    )
+
+
+# ─────────────────────────────────────────────────────────── Composable PSD
+@router.post(
+    "/workspaces/{slug}/compose/discover",
+    response_model=ComposeDiscoverResponse,
+    summary="Analyse a finished design → JSON manifest of visual elements",
+)
+async def compose_discover(
+    body: ComposeDiscoverRequest,
+    workspace: Workspace = Depends(resolve_workspace),
+    session: Session = Depends(get_session),
+    client: AsyncOpenAI = Depends(get_openai_client),
+) -> ComposeDiscoverResponse:
+    """Run GPT-4o-mini vision over the source design and return a JSON
+    manifest of detected visual elements (logos, headlines, illustrations,
+    ornaments, body-copy blocks) with positions in mm + suggested prompts.
+
+    The frontend renders this manifest for review, lets the user edit
+    each element's prompt, add missing elements, or remove unwanted ones,
+    then calls the assemble endpoint with the final manifest.
+    """
+    source = _resolve_asset(session, workspace, body.source_asset_id, "source_asset_id")
+    if source.kind != "generation":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Can only compose from 'generation' assets; "
+                f"asset {body.source_asset_id} is '{source.kind}'."
+            ),
+        )
+
+    # Pull frozen trim dims from the workspace specs.
+    specs = workspace.specs or {}
+    trim = specs.get("trim_mm") or {}
+    try:
+        trim_w = float(trim["w"])
+        trim_h = float(trim["h"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Workspace '{workspace.slug}' is missing frozen trim specs."
+            ),
+        ) from exc
+
+    image_bytes = absolute_path(workspace, source).read_bytes()
+    specs_list = await discover_elements(
+        client,
+        image_bytes,
+        trim_mm=(trim_w, trim_h),
+        extra_hint=body.extra_hint,
+    )
+
+    log.info(
+        "compose_discovered",
+        workspace=workspace.slug,
+        source_asset_id=source.id,
+        element_count=len(specs_list),
+    )
+    return ComposeDiscoverResponse(
+        source_asset_id=source.id or 0,
+        trim_mm={"w": trim_w, "h": trim_h},
+        elements=[ElementSpecOut(**s.to_dict()) for s in specs_list],
+        # GPT-4o-mini vision ~$0.001-0.005 per call; we don't surface
+        # exact tokens (the chat-completions response doesn't carry the
+        # same usage shape as images). Reported as 0 for now.
+        discovery_cost_usd=0.0,
+    )
+
+
+@router.post(
+    "/workspaces/{slug}/exports/psd-composable",
+    response_model=ComposeAssembleResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate every element + assemble into a layered PSD",
+)
+async def compose_assemble(
+    body: ComposeAssembleRequest,
+    workspace: Workspace = Depends(resolve_workspace),
+    session: Session = Depends(get_session),
+    client: AsyncOpenAI = Depends(get_openai_client),
+) -> ComposeAssembleResponse:
+    """Fire N parallel gpt-image-2 calls (one per element) with
+    ``transparent_background=true``, then assemble the results into a
+    proper layered PSD at CMYK 300 DPI.
+
+    ``body.elements`` is the final manifest after the user reviewed +
+    edited + added missing items. ``kind="body_copy"`` elements are
+    skipped during per-element generation — the assumption is the user
+    will handle dense regulatory copy via the Tier A+OCR pipeline
+    instead (cheaper, no garbled small print risk).
+    """
+    settings = get_settings()
+    source = _resolve_asset(session, workspace, body.source_asset_id, "source_asset_id")
+    if source.kind != "generation":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Can only compose from 'generation' assets; "
+                f"asset {body.source_asset_id} is '{source.kind}'."
+            ),
+        )
+
+    specs_ws = workspace.specs or {}
+    trim = specs_ws.get("trim_mm") or {}
+    try:
+        trim_w = float(trim["w"])
+        trim_h = float(trim["h"])
+        bleed = float(specs_ws["bleed_mm"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Workspace '{workspace.slug}' is missing trim/bleed specs.",
+        ) from exc
+
+    # Filter out body_copy elements — those route to OCR, not gpt-image-2.
+    renderable = [e for e in body.elements if e.kind != "body_copy"]
+    if not renderable:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "No renderable elements in the manifest (everything was "
+                "'body_copy', which is handled by Tier A+OCR instead)."
+            ),
+        )
+
+    # Generate each element sequentially. FastAPI's single-process worker
+    # makes parallelism cheap to defer; sequential keeps OpenAI rate
+    # limiting predictable.
+    generated: list[GeneratedElement] = []
+    try:
+        for elem_spec in renderable:
+            spec = ElementSpec.from_dict(elem_spec.model_dump())
+            gen = await generate_element(
+                client,
+                spec,
+                model=settings.openai_image_model,
+                quality=body.quality,
+            )
+            generated.append(gen)
+    except Exception as exc:
+        log.exception(
+            "compose_element_generation_failed",
+            workspace=workspace.slug,
+            source=source.id,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail=f"Per-element generation failed: {exc}",
+        ) from exc
+
+    # Persist each generated element as an Asset(kind="generation") so
+    # the frontend can show them, allow per-element regeneration, etc.
+    persisted_elements: list[ComposeElementOut] = []
+    for g in generated:
+        # Persist each element as a regular generation. The audit row
+        # uses the default "asset.generated" event — element identity is
+        # captured by the prompt + the assembled-PSD payload below.
+        asset = save_generation(
+            session,
+            workspace,
+            image_bytes=g.png_bytes,
+            prompt=f"[composable:{g.spec.name}] {g.spec.prompt}",
+            model=settings.openai_image_model,
+            size=g.spec.size_px,
+            quality=body.quality,
+            variant_index=0,
+            usage={},
+            reference_ids=[source.id] if source.id else None,
+        )
+        persisted_elements.append(
+            ComposeElementOut(
+                name=g.spec.name,
+                label=g.spec.label,
+                asset_id=asset.id or 0,
+                width_px=g.width_px,
+                height_px=g.height_px,
+                cost_usd=g.cost_usd,
+            )
+        )
+
+    # Assemble the layered PSD.
+    out_path = (
+        workspace_root(workspace.slug)
+        / "exports"
+        / derive_composable_filename(source.id or 0)
+    )
+    try:
+        result = assemble_composable_psd(
+            elements=generated,
+            trim_mm=(trim_w, trim_h),
+            bleed_mm=bleed,
+            dpi=body.dpi,
+            out_path=out_path,
+            color_space=body.color_space,
+        )
+    except Exception as exc:
+        log.exception("compose_assembly_failed", workspace=workspace.slug)
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"PSD assembly failed: {exc}",
+        ) from exc
+
+    # Register the assembled PSD as an export Asset.
+    export_asset = save_export(
+        session,
+        workspace,
+        source_asset_id=source.id or 0,
+        out_path=result.path,
+        mime_type="image/vnd.adobe.photoshop",
+        payload_extra={
+            "tier": "Composable",
+            "element_count": result.element_count,
+            "layer_count": result.layer_count,
+            "dpi": result.dpi,
+            "color_space": body.color_space,
+            "width_px": result.width_px,
+            "height_px": result.height_px,
+            "elements": [e.model_dump() for e in persisted_elements],
+            "total_generation_cost_usd": result.total_generation_cost_usd,
+        },
+        audit_event="export.psd.composable.created",
+    )
+
+    log.info(
+        "composable_psd_exported",
+        workspace=workspace.slug,
+        source_asset_id=source.id,
+        export_asset_id=export_asset.id,
+        elements=result.element_count,
+        cost_usd=result.total_generation_cost_usd,
+    )
+    return ComposeAssembleResponse(
+        asset=_asset_to_out(export_asset, workspace),
+        source_asset_id=source.id or 0,
+        element_count=result.element_count,
+        layer_count=result.layer_count,
+        elements=persisted_elements,
+        total_cost_usd=result.total_generation_cost_usd,
+        dpi=result.dpi,
+        color_space=body.color_space,
+        width_px=result.width_px,
+        height_px=result.height_px,
     )
 
 

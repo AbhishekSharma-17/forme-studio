@@ -61,20 +61,32 @@ async def generate(
     quality: str = "high",
     n: int = 1,
     timeout: float | None = None,
+    transparent_background: bool = False,
 ) -> GenerationResult:
     """Generate ``n`` variants in one round-trip. No partial frames.
 
     ``size`` must be a value gpt-image-2 accepts directly
     (1024x1024, 1024x1536, 1536x1024, 2048x2048, …).
+
+    When ``transparent_background=True`` we add the gpt-image-2 native
+    alpha-channel flag — the model produces a true RGBA PNG with the
+    background cleanly transparent. Used by the composable-PSD workflow
+    (slice 8) so each element layer drops cleanly onto the assembled
+    canvas without SAM-2 masking artefacts.
     """
-    res = await client.images.generate(  # type: ignore[call-overload]
-        model=model,
-        prompt=prompt,
-        size=size,
-        quality=quality,
-        n=n,
-        timeout=timeout,
-    )
+    kwargs: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "size": size,
+        "quality": quality,
+        "n": n,
+    }
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if transparent_background:
+        # gpt-image-2 honours `background="transparent"` natively.
+        kwargs["background"] = "transparent"
+    res = await client.images.generate(**kwargs)  # type: ignore[call-overload]
     images = [d.b64_json for d in (res.data or []) if d.b64_json]
     return GenerationResult(
         images_b64=images,

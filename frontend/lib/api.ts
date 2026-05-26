@@ -161,7 +161,7 @@ export interface ReferenceUploadResponse {
   total: number;
 }
 
-export type PsdTier = "A" | "A+OCR" | "B" | "C";
+export type PsdTier = "A" | "A+OCR" | "B" | "C" | "COMPOSABLE";
 
 export interface PsdExportRequest {
   source_asset_id: number;
@@ -218,6 +218,68 @@ export interface VectorExportResponse {
   provider: VectorProvider;
   mode: string | null;
   size_bytes: number;
+}
+
+// ──────────────────────────────────────────────────── Composable PSD (slice 8)
+
+export type ElementKind =
+  | "graphic"
+  | "wordmark"
+  | "headline"
+  | "ornament"
+  | "seal"
+  | "body_copy";
+
+export interface ElementSpec {
+  name: string;
+  label: string;
+  prompt: string;
+  /** [x, y, w, h] in millimetres, relative to trim top-left. */
+  position_mm: [number, number, number, number];
+  size_px: "1024x1024" | "1024x1536" | "1536x1024";
+  kind: ElementKind;
+}
+
+export interface ComposeDiscoverRequest {
+  source_asset_id: number;
+  extra_hint?: string;
+}
+
+export interface ComposeDiscoverResponse {
+  source_asset_id: number;
+  trim_mm: { w: number; h: number };
+  elements: ElementSpec[];
+  discovery_cost_usd: number;
+}
+
+export interface ComposeAssembleRequest {
+  source_asset_id: number;
+  elements: ElementSpec[];
+  quality?: "low" | "medium" | "high" | "auto";
+  dpi?: number;
+  color_space?: "CMYK" | "RGB";
+}
+
+export interface ComposeElement {
+  name: string;
+  label: string;
+  asset_id: number;
+  width_px: number;
+  height_px: number;
+  cost_usd: number;
+}
+
+export interface ComposeAssembleResponse {
+  asset: Asset;
+  source_asset_id: number;
+  element_count: number;
+  layer_count: number;
+  elements: ComposeElement[];
+  total_cost_usd: number;
+  dpi: number;
+  color_space: string;
+  width_px: number;
+  height_px: number;
 }
 
 export type CdrProvider = "cloudconvert" | "uniconvertor";
@@ -502,6 +564,28 @@ export const api = {
   ): Promise<CdrExportResponse> {
     return request<CdrExportResponse>(
       `/api/packaging/workspaces/${slug}/exports/cdr`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  },
+
+  // ─────────────────────────────────────── Composable PSD (slice 8)
+
+  composeDiscover(
+    slug: string,
+    body: ComposeDiscoverRequest,
+  ): Promise<ComposeDiscoverResponse> {
+    return request<ComposeDiscoverResponse>(
+      `/api/packaging/workspaces/${slug}/compose/discover`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  },
+
+  composeAssemble(
+    slug: string,
+    body: ComposeAssembleRequest,
+  ): Promise<ComposeAssembleResponse> {
+    return request<ComposeAssembleResponse>(
+      `/api/packaging/workspaces/${slug}/exports/psd-composable`,
       { method: "POST", body: JSON.stringify(body) },
     );
   },

@@ -248,6 +248,86 @@ class VectorExportResponse(BaseModel):
     size_bytes: int
 
 
+class ElementSpecOut(BaseModel):
+    """One detected/specified element in a composable PSD manifest."""
+
+    name: str
+    label: str
+    prompt: str
+    position_mm: list[float]            # [x, y, w, h]
+    size_px: str
+    kind: str
+
+
+class ComposeDiscoverRequest(BaseModel):
+    """Body for ``POST /workspaces/{slug}/compose/discover``."""
+
+    source_asset_id: int = Field(
+        ..., description="The approved whole-sticker generation to decompose."
+    )
+    extra_hint: str | None = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Optional designer hint to bias the decomposition, e.g. "
+            "'isolate the brand mark and hero illustration'."
+        ),
+    )
+
+
+class ComposeDiscoverResponse(BaseModel):
+    """Response body for the discovery call."""
+
+    source_asset_id: int
+    trim_mm: dict[str, float]
+    elements: list[ElementSpecOut]
+    discovery_cost_usd: float
+
+
+class ComposeAssembleRequest(BaseModel):
+    """Body for ``POST /workspaces/{slug}/exports/psd-composable``."""
+
+    source_asset_id: int
+    elements: list[ElementSpecOut] = Field(
+        ...,
+        min_length=1,
+        max_length=30,
+        description="Final manifest after the user has reviewed + edited.",
+    )
+    quality: str = Field(
+        "high",
+        description="gpt-image-2 quality for per-element generation.",
+    )
+    dpi: int = Field(300, ge=72, le=1200)
+    color_space: str = Field("CMYK", description="'CMYK' (press) or 'RGB'.")
+
+
+class ComposeElementOut(BaseModel):
+    """One generated element + its asset reference."""
+
+    name: str
+    label: str
+    asset_id: int
+    width_px: int
+    height_px: int
+    cost_usd: float
+
+
+class ComposeAssembleResponse(BaseModel):
+    """Response body for the assemble call."""
+
+    asset: AssetOut
+    source_asset_id: int
+    element_count: int
+    layer_count: int
+    elements: list[ComposeElementOut]
+    total_cost_usd: float
+    dpi: int
+    color_space: str
+    width_px: int
+    height_px: int
+
+
 class WorkspaceDeleteRequest(BaseModel):
     """Body for ``DELETE /workspaces/{slug}``.
 
