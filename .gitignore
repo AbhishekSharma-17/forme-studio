@@ -1,0 +1,100 @@
+# =============================================================================
+# Forme Studio — root .gitignore
+#
+# Belt-and-braces: subdirectory .gitignore files in backend/ and frontend/
+# already cover most of this, but we restate the critical exclusions here so
+# that secrets / generated artefacts cannot leak even if the layout shifts.
+# =============================================================================
+
+# --- Secrets (NEVER commit) --------------------------------------------------
+.env
+.env.local
+.env.*.local
+backend/.env
+backend/.env.local
+frontend/.env*.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+credentials/
+
+# --- Local SQLite + per-workspace data ---------------------------------------
+forme.db
+forme.db-journal
+forme.db-shm
+forme.db-wal
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+workspaces/
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+build/
+dist/
+
+# --- Node / Next.js ----------------------------------------------------------
+node_modules/
+.pnpm-store/
+.pnp.*
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+.npm/
+.yarn/
+.yarn-integrity
+
+# --- Editor / OS -------------------------------------------------------------
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# --- Logs / tmp --------------------------------------------------------------
+*.log
+logs/
+tmp/
+*.tmp
+*.bak
+.cache/
+
+# --- Test / coverage artefacts -----------------------------------------------
+coverage/
+.nyc_output/
+
+# --- Misc local --------------------------------------------------------------
+*.DS_Store
+.claude/
