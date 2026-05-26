@@ -52,8 +52,15 @@ alongside extra reference images.
    - Serum dropper label (50 × 80 mm)
    - Shampoo pouch (90 × 120 mm)
    Each preset shows its frozen specs in a live preview.
-4. (Optional) Add a short brief in the description field.
-5. **Create workspace.** Forme creates the on-disk folder tree:
+4. **Pick a starting point** — two modes, same pipeline downstream:
+   - **"I have the design" (default)** — you upload a finished label,
+     we recreate it component-by-component and assemble.
+   - **"I have the bottle"** — you upload a plain product photo +
+     style reference + brief; the studio runs a *Design Round* on the
+     bottle, you iterate variants, then **Approve & flatten** drops
+     the design into the Make-print-ready pipeline.
+5. (Optional) Add a short brief in the description field.
+6. **Create workspace.** Forme creates the on-disk folder tree:
    ```
    workspaces/<your-slug>/
    ├── brief.md           ← edit freely
@@ -131,49 +138,56 @@ base via the audit chain (`asset.edited` event with `edit_of` +
 To go back to a fresh generation, click the X on the edit banner or hit
 Cancel.
 
-### 3.7 Export as PSD
+### 3.7 Make print-ready (the headline action)
 
-The PSD button is a **split control**: click the left half for an
-instant Tier A export, or the chevron on the right for the full menu:
+Hover any approved variant and click **Make print-ready**. One CTA
+runs the whole pipeline:
 
-| Tier | What it is | Use when |
-| --- | --- | --- |
-| **A · Flat** | Single CMYK layer at 300 DPI | Quick proof, simple SKUs, fastest |
-| **A+OCR · Editable text** | Tier A + Tesseract-OCR'd text overlays + `.ocr.json` sidecar | Designer needs to retype copy or fix garbled small print without re-rendering |
-| **Composable · Best quality** | Multi-layered editable PSD — every visual element regenerated on a transparent canvas, assembled by name + position | Designer needs the full Photoshop file with each logo / illustration / wordmark as its own editable layer |
+1. **Analyse** — Forme runs GPT-4o-mini vision (graphic elements) and
+   Tesseract OCR (text regions) in one pass and returns a unified
+   manifest sorted top-to-bottom.
+2. **Review** — a dialog shows every element side-by-side:
+   - Graphic rows let you edit the per-element prompt, kind, position
+     (mm), and target render size.
+   - Text rows show the OCR'd content in an editable textarea with a
+     confidence chip. Anything below 75% confidence is flagged yellow —
+     verify it before assembling.
+   - **+ Add element** / **+ Add text block** insert anything the
+     analyser missed.
+   - **Remove** drops elements you don't want.
+   - A toggle controls whether line-art elements (logos, wordmarks,
+     ornaments) get auto-vectorized during assembly. On = press-grade
+     SVG/CDR; off = save ~$0.80–$1.20 in Vectorizer.AI credits.
+3. **Assemble** — Forme fires one gpt-image-2 call per graphic with
+   `background=transparent`, renders each text element via Pillow on a
+   transparent canvas, optionally vectorizes the line-art layers, then
+   composites into:
+   - **PSD** — multi-layered CMYK at 300 DPI, every element its own
+     named editable Photoshop layer
+   - **SVG** — vector composite (line-art as `<g>`, photos embedded as
+     `<image>`)
+4. **Cascade** — the same source feeds your PDF/X-4 and CDR exports
+   (use the secondary icons on each variant). All formats land in
+   `workspaces/<slug>/exports/` and are listed at the bottom of the
+   page.
 
-- The file downloads immediately *and* persists under
-  `workspaces/<slug>/exports/`.
-- Tier A+OCR also writes a sidecar `.ocr.json` listing every detected
-  text region with `text`, `bbox`, and `confidence`.
-- The **Exports** section at the bottom of the page lists every export
-  with filename, tier, size, and a re-download link.
+#### Costs
 
-#### When Tier A+OCR is unavailable
+- Vision discover (one per analyse): ~$0.001–$0.005
+- Per-element gpt-image-2 (high quality): ~$0.02–$0.10
+- Per-element vectorize (when enabled): ~$0.20 (production) / $0.02 (test)
+- Typical sticker (~6 graphics + 3 text blocks) lands between $0.50 and
+  $1.50 with vectorization on, $0.30–$0.80 with it off.
 
-The dropdown item greys out when either Tesseract isn't on the
-configured path **or** `FORME_TIER_C_ENABLED` is off. The Settings page
-shows both and explains the fix (`brew install tesseract`, then flip
-the *Tier A+OCR* toggle in Settings).
+#### OCR availability
 
-#### The Composable flow
+OCR runs automatically when Tesseract is on PATH (the AppShell capability
+strip shows the dot). When it's missing, the dialog tells you and the
+manifest carries graphic elements only — you can still **+ Add text
+block** entries manually for anything you need typed onto the label.
 
-Picking **Composable** from the PSD ▾ menu opens a review dialog:
-
-1. Forme calls GPT-4o-mini vision over your approved generation and
-   returns a JSON manifest of detected elements (logos, headlines,
-   illustrations, ornaments, body-copy blocks) with positions in mm.
-2. You review the manifest — edit any element's prompt, change its
-   kind, reposition / resize, add missing elements, or remove ones you
-   don't want regenerated.
-3. Pick a quality (medium / high) and click *Generate + assemble*.
-4. Forme fires one gpt-image-2 call per element with
-   `background=transparent`, then assembles the results by name +
-   position into a layered CMYK PSD.
-
-Every element lands as its own `Asset(kind="generation")` in the
-gallery (regeneratable individually) and the final composable PSD lands
-in the Exports table.
+Install with `brew install tesseract` (macOS) or
+`apt install tesseract-ocr` (Linux).
 
 ### 3.8 Export as Print PDF/X-4
 

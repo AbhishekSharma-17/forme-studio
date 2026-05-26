@@ -40,8 +40,12 @@ const KIND_OPTIONS: { value: ElementKind; label: string }[] = [
   { value: "headline", label: "Headline (display text)" },
   { value: "ornament", label: "Ornament (decorative)" },
   { value: "seal", label: "Seal (badge / corner sticker)" },
-  { value: "body_copy", label: "Body copy (skip — handled by OCR)" },
+  { value: "text", label: "Text (OCR / typeset)" },
+  { value: "body_copy", label: "Body copy (skip during assembly)" },
 ];
+
+/** OCR confidence below this is shown as a yellow warning chip. */
+const LOW_OCR_CONFIDENCE = 75;
 
 const SIZE_OPTIONS = [
   { value: "1024x1024" as const, label: "1024×1024 (square)" },
@@ -57,6 +61,10 @@ export function ComposeDialog({ workspace, sourceAsset, onClose }: Props) {
   const [result, setResult] = useState<ComposeAssembleResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [quality, setQuality] = useState<"medium" | "high">("medium");
+  // Slice 10c — auto-vectorize line-art elements (wordmarks, ornaments)
+  // during assembly. Pays ~$0.80–$1.20 in Vectorizer.AI credits per
+  // sticker but yields a clean SVG composite for CDR / Illustrator.
+  const [vectorize, setVectorize] = useState(true);
 
   // Escape closes (unless we're mid-assemble).
   useEffect(() => {
@@ -109,6 +117,26 @@ export function ComposeDialog({ workspace, sourceAsset, onClose }: Props) {
         position_mm: [10, 10, 50, 50],
         size_px: "1024x1024",
         kind: "graphic",
+        text: null,
+        confidence: null,
+        vectorizable: false,
+      },
+    ]);
+  }
+
+  function addTextElement() {
+    setElements((prev) => [
+      ...prev,
+      {
+        name: `text_${prev.length + 1}`,
+        label: "New text block",
+        prompt: "User-supplied text",
+        position_mm: [10, 10, 50, 12],
+        size_px: "1536x1024",
+        kind: "text",
+        text: "",
+        confidence: null,
+        vectorizable: false,
       },
     ]);
   }
@@ -129,6 +157,7 @@ export function ComposeDialog({ workspace, sourceAsset, onClose }: Props) {
         quality,
         dpi: 300,
         color_space: "CMYK",
+        vectorize,
       });
       setResult(res);
       setStage("done");
@@ -158,9 +187,9 @@ export function ComposeDialog({ workspace, sourceAsset, onClose }: Props) {
           <div className="flex items-center gap-2">
             <Wand2 size={18} className="text-clay-600" />
             <h3 className="font-display text-lg text-ink-900">
-              Compose into layered PSD
+              Make print-ready
             </h3>
-            <Badge tone="clay">beta</Badge>
+            <Badge tone="clay">composable</Badge>
           </div>
           <button
             type="button"
@@ -189,6 +218,9 @@ export function ComposeDialog({ workspace, sourceAsset, onClose }: Props) {
               onUpdate={updateElement}
               onRemove={removeElement}
               onAdd={addElement}
+              onAddText={addTextElement}
+              vectorize={vectorize}
+              setVectorize={setVectorize}
             />
           )}
           {stage === "done" && result && (
@@ -209,10 +241,13 @@ export function ComposeDialog({ workspace, sourceAsset, onClose }: Props) {
                 <>
                   {" · "}
                   <strong>{bodyCopyCount}</strong> body-copy block
-                  {bodyCopyCount === 1 ? "" : "s"} (skipped — use OCR)
+                  {bodyCopyCount === 1 ? "" : "s"} (skipped)
                 </>
               )}
               {" · "}est. <strong>${estimatedCost.toFixed(2)}</strong>
+              {vectorize && (
+                <span className="text-ink-400"> + vector credits</span>
+              )}
             </div>
           )}
           {stage !== "review" && <div />}
@@ -291,19 +326,29 @@ function IntroStage({
   return (
     <div className="space-y-4 text-sm text-ink-700 max-w-2xl mx-auto py-6">
       <p>
-        Composable PSD splits this finished design into individual
-        visual elements (logo, headline, hero illustration, ornaments,
-        etc.), regenerates each one cleanly on a transparent canvas via
-        gpt-image-2, then assembles them into a properly-layered PSD.
-        Designers love this format — every element is its own editable
-        Photoshop layer.
+        Make print-ready turns this finished design into a layered,
+        editable PSD plus a vector SVG composite. The pipeline:
       </p>
+      <ol className="text-ink-700 text-sm space-y-1.5 list-decimal list-inside ml-2">
+        <li>
+          <strong>Analyse</strong> — vision discovers every graphic
+          element; OCR discovers every text region.
+        </li>
+        <li>
+          <strong>Review</strong> — edit prompts, fix any garbled OCR
+          text, reposition, add or remove elements.
+        </li>
+        <li>
+          <strong>Assemble</strong> — gpt-image-2 regenerates each
+          graphic on a transparent canvas; Pillow renders the text
+          fresh; line-art elements auto-vectorize; everything composites
+          into one layered PSD + SVG with the correct CMYK / mm specs.
+        </li>
+      </ol>
       <p className="text-ink-500 text-xs">
-        Step 1 of 3: a vision model analyses your design and proposes a
-        manifest. You then review/edit/add elements before generation
-        starts. Body-copy blocks (long ingredient lists, directions)
-        are flagged and skipped — they're better handled by Tier
-        A+OCR's editable text overlays.
+        Every visual element becomes its own editable Photoshop layer.
+        Designers can swap, restyle, or replace any single element
+        without re-rendering the whole sticker.
       </p>
       <div>
         <Label
@@ -337,20 +382,72 @@ function ReviewStage({
   onUpdate,
   onRemove,
   onAdd,
+  onAddText,
+  vectorize,
+  setVectorize,
 }: {
   elements: ElementSpec[];
   onUpdate: (idx: number, patch: Partial<ElementSpec>) => void;
   onRemove: (idx: number) => void;
   onAdd: () => void;
+  onAddText: () => void;
+  vectorize: boolean;
+  setVectorize: (v: boolean) => void;
 }) {
+  const lowConfidenceCount = elements.filter(
+    (e) =>
+      e.kind === "text" &&
+      e.confidence !== null &&
+      e.confidence !== undefined &&
+      e.confidence < LOW_OCR_CONFIDENCE,
+  ).length;
+
   return (
     <div className="space-y-3">
       <div className="rounded-md border border-clay-200 bg-clay-50/60 px-3 py-2 text-xs text-clay-900">
-        <strong>Review + refine.</strong> Edit any prompt to make it more
-        specific. Remove elements you don&apos;t want isolated. Click{" "}
-        <strong>+ Add element</strong> for anything the analyser missed.
+        <strong>Review + refine.</strong> Edit any element&apos;s text or
+        prompt. Adjust position / size. Remove elements you don&apos;t
+        want. Click <strong>+ Add element</strong> /{" "}
+        <strong>+ Add text</strong> for anything the analyser missed.
         Then hit <strong>Generate + assemble</strong>.
       </div>
+
+      {lowConfidenceCount > 0 && (
+        <div className="rounded-md border border-amber-200 bg-amber-50/80 px-3 py-2 text-xs text-amber-900 flex items-start gap-2">
+          <CircleAlert size={14} className="mt-0.5 shrink-0" />
+          <span>
+            <strong>{lowConfidenceCount}</strong> text element
+            {lowConfidenceCount === 1 ? "" : "s"} have low OCR
+            confidence (&lt; {LOW_OCR_CONFIDENCE}%). Check them carefully
+            and edit the text before assembling — they may be garbled.
+          </span>
+        </div>
+      )}
+
+      {/* Auto-vectorize toggle (slice 10c) */}
+      <label
+        htmlFor="vectorize-toggle"
+        className="flex items-start gap-3 cursor-pointer rounded-md border border-ink-200 bg-paper-50/50 px-3 py-2 hover:bg-paper-100/60"
+      >
+        <input
+          id="vectorize-toggle"
+          type="checkbox"
+          checked={vectorize}
+          onChange={(e) => setVectorize(e.target.checked)}
+          className="mt-0.5 h-4 w-4 rounded border-ink-300 text-clay-600 focus:ring-clay-500"
+        />
+        <div className="flex-1 text-xs text-ink-700">
+          <span className="font-semibold text-ink-900">
+            Auto-vectorize line-art elements
+          </span>
+          <p className="mt-0.5 text-ink-500 leading-relaxed">
+            Logos / wordmarks / ornaments get traced into clean SVG
+            paths during assembly so the SVG and CDR exports stay crisp
+            at any print size. Adds ~$0.80–$1.20 in Vectorizer.AI credits
+            per sticker. Photo illustrations stay raster regardless.
+          </p>
+        </div>
+      </label>
 
       {elements.map((el, idx) => (
         <ElementRow
@@ -361,14 +458,24 @@ function ReviewStage({
         />
       ))}
 
-      <button
-        type="button"
-        onClick={onAdd}
-        className="w-full rounded-md border-2 border-dashed border-ink-300 px-3 py-3 text-sm text-ink-600 hover:bg-paper-100 hover:border-clay-400 transition-colors inline-flex items-center justify-center gap-1.5"
-      >
-        <Plus size={14} />
-        Add element the analyser missed
-      </button>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={onAdd}
+          className="rounded-md border-2 border-dashed border-ink-300 px-3 py-3 text-sm text-ink-600 hover:bg-paper-100 hover:border-clay-400 transition-colors inline-flex items-center justify-center gap-1.5"
+        >
+          <Plus size={14} />
+          Add element (graphic)
+        </button>
+        <button
+          type="button"
+          onClick={onAddText}
+          className="rounded-md border-2 border-dashed border-ink-300 px-3 py-3 text-sm text-ink-600 hover:bg-paper-100 hover:border-clay-400 transition-colors inline-flex items-center justify-center gap-1.5"
+        >
+          <Plus size={14} />
+          Add text block
+        </button>
+      </div>
     </div>
   );
 }
@@ -383,11 +490,24 @@ function ElementRow({
   onRemove: () => void;
 }) {
   const isBodyCopy = element.kind === "body_copy";
+  const isText = element.kind === "text";
+  const lowConfidence =
+    isText &&
+    element.confidence !== null &&
+    element.confidence !== undefined &&
+    element.confidence < LOW_OCR_CONFIDENCE;
+
   return (
     <div
       className={cn(
-        "rounded-md border border-ink-200 px-3 py-2.5 space-y-2",
-        isBodyCopy ? "bg-paper-100/60 opacity-70" : "bg-white",
+        "rounded-md border px-3 py-2.5 space-y-2",
+        isBodyCopy
+          ? "border-ink-200 bg-paper-100/60 opacity-70"
+          : lowConfidence
+            ? "border-amber-300/80 bg-amber-50/40"
+            : isText
+              ? "border-ink-200 bg-paper-50/40"
+              : "border-ink-200 bg-white",
       )}
     >
       <div className="flex items-center gap-2">
@@ -397,6 +517,11 @@ function ElementRow({
           className="flex-1 font-medium text-sm"
           placeholder="Label"
         />
+        {isText && element.confidence !== null && element.confidence !== undefined && (
+          <Badge tone={lowConfidence ? "warning" : "sage"}>
+            OCR {element.confidence.toFixed(0)}%
+          </Badge>
+        )}
         <Select
           value={element.kind}
           onChange={(e) =>
@@ -420,14 +545,38 @@ function ElementRow({
         </button>
       </div>
 
-      <textarea
-        value={element.prompt}
-        onChange={(e) => onUpdate({ prompt: e.target.value })}
-        rows={2}
-        disabled={isBodyCopy}
-        className="w-full rounded-md border border-ink-200 px-2.5 py-1.5 text-xs font-mono disabled:bg-paper-100 disabled:text-ink-400 resize-y"
-        placeholder="Self-contained prompt for this element alone. End with: Transparent background. Isolated. No other elements."
-      />
+      {isText ? (
+        <div>
+          <label
+            htmlFor={`text-${element.name}`}
+            className="block text-[10px] font-semibold uppercase tracking-wider text-ink-500 mb-1"
+          >
+            Text content {lowConfidence && "— please verify, low OCR confidence"}
+          </label>
+          <textarea
+            id={`text-${element.name}`}
+            value={element.text ?? ""}
+            onChange={(e) => onUpdate({ text: e.target.value })}
+            rows={2}
+            className={cn(
+              "w-full rounded-md border px-2.5 py-1.5 text-sm resize-y",
+              lowConfidence
+                ? "border-amber-300 bg-amber-50/30"
+                : "border-ink-200 bg-white",
+            )}
+            placeholder="Type the exact text that should appear in the final layer."
+          />
+        </div>
+      ) : (
+        <textarea
+          value={element.prompt}
+          onChange={(e) => onUpdate({ prompt: e.target.value })}
+          rows={2}
+          disabled={isBodyCopy}
+          className="w-full rounded-md border border-ink-200 px-2.5 py-1.5 text-xs font-mono disabled:bg-paper-100 disabled:text-ink-400 resize-y"
+          placeholder="Self-contained prompt for this element alone. End with: Transparent background. Isolated. No other elements."
+        />
+      )}
 
       <div className="grid grid-cols-5 gap-2 items-end">
         <FieldNumber

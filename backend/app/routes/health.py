@@ -33,13 +33,6 @@ class Capabilities(BaseModel):
     cdr_uniconvertor: bool        # binary present
 
 
-class TierAvailability(BaseModel):
-    """Which PSD tiers the current configuration can serve right now."""
-
-    tier_a: bool      # always true
-    tier_a_ocr: bool  # Tesseract + FORME_TIER_C_ENABLED=true
-
-
 class ProvidersSelected(BaseModel):
     """The active primary + fallback per pipeline stage.
 
@@ -59,7 +52,6 @@ class HealthOut(BaseModel):
     image_model: str
     capabilities: Capabilities
     providers: ProvidersSelected
-    tiers: TierAvailability
 
 
 @router.get("/api/health", response_model=HealthOut, summary="Liveness + capabilities")
@@ -94,10 +86,5 @@ async def health() -> HealthOut:
             cdr_fallback=(
                 s.cdr_fallback if s.cdr_fallback != "none" else None
             ),
-        ),
-        tiers=TierAvailability(
-            tier_a=True,
-            # A+OCR needs Tesseract + the OCR toggle.
-            tier_a_ocr=tesseract_present and s.tier_c_enabled,
         ),
     )

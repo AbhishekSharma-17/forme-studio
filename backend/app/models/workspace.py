@@ -40,5 +40,14 @@ class Workspace(SQLModel, table=True):
 
     description: str | None = Field(default=None, max_length=2000)
 
+    # Design mode (slice 10d):
+    # * False (default) — "Analyze-existing" flow: user uploads a finished
+    #   label PNG, system analyzes + assembles + exports.
+    # * True — "Brainstorm-on-product" flow: user uploads a plain product
+    #   photo + style references + brief, system designs the label visible
+    #   on the product, iterates, approves, auto-flattens, then feeds into
+    #   the analyze + assemble pipeline.
+    design_mode: bool = Field(default=False)
+
     created_at: datetime = Field(default_factory=_utc_now, index=True)
     updated_at: datetime = Field(default_factory=_utc_now)

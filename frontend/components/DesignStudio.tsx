@@ -2,11 +2,12 @@
 
 import {
   Box,
-  ChevronDown,
+  CheckCircle2,
   CircleAlert,
   Download,
   FileImage,
   FileText,
+  Layers,
   Loader2,
   PauseCircle,
   Pencil,
@@ -14,7 +15,7 @@ import {
   Shapes,
   Sparkles,
   Sprout,
-  Type,
+  Wand2,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -31,8 +32,6 @@ import {
   type Asset,
   type CdrProvider,
   type ProvidersSelected,
-  type PsdTier,
-  type TierAvailability,
   type VectorProvider,
   type Workspace,
 } from "@/lib/api";
@@ -49,7 +48,6 @@ interface Props {
   initialReferences: Asset[];
   initialExports: Asset[];
   canGenerate: boolean;
-  tiers: TierAvailability;
   providers: ProvidersSelected;
   /** When false, the CDR button is hidden from variant tiles and the
    *  gallery. Comes from /api/health → capabilities.cdr_enabled, which
@@ -90,7 +88,6 @@ export function DesignStudio({
   initialReferences,
   initialExports,
   canGenerate,
-  tiers,
   providers,
   cdrEnabled,
 }: Props) {
@@ -262,32 +259,39 @@ export function DesignStudio({
     setReferences((prev) => [...added, ...prev]);
   }
 
-  async function handleExportPsd(
-    asset: Asset,
-    tier: PsdTier = "A",
-    colorSpace: "CMYK" | "RGB" = "CMYK",
-  ) {
-    // Composable is interactive (multi-step dialog), not a direct export.
-    // Intercept before any API call and open the dialog instead.
-    if (tier === "COMPOSABLE") {
-      setComposingAsset(asset);
-      return;
-    }
+  function handleMakePrintReady(asset: Asset) {
+    // The headline CTA. Opens the unified Compose dialog where the user
+    // reviews the auto-discovered manifest (graphics + OCR text),
+    // edits / regenerates, then assembles a multi-layered PSD + sibling
+    // SVG composite. Everything else (PDF / SVG download / CDR) is a
+    // secondary one-click export off the raw generation PNG.
+    setComposingAsset(asset);
+  }
+
+  async function handleFlatten(asset: Asset) {
+    // Slice 10e — Design Round handoff. Workspace must have
+    // design_mode=true. Takes the approved bottle-mockup variant, calls
+    // the flatten endpoint to render the design as a clean rectangular
+    // sticker, swaps the active source so the user can hit "Make
+    // print-ready" on the flat result.
     if (exporting[asset.id]) return;
     setExporting((prev) => ({ ...prev, [asset.id]: true }));
     setExportError(null);
     try {
-      const res = await api.exportPsd(workspace.slug, {
+      const res = await api.designFlatten(workspace.slug, {
         source_asset_id: asset.id,
-        tier,
-        color_space: colorSpace,
-        dpi: 300,
+        quality,
       });
-      setExports((prev) => [res.asset, ...prev]);
-      downloadAsset(res.asset);
+      // Refresh the gallery so the new flat-label generation appears
+      // at the top, then auto-scroll to it.
+      const fresh = await api.listAssets(workspace.slug, "generation");
+      setGenerations(fresh);
+      // Open Compose immediately on the flat result — this is the
+      // natural next step in the design-mode workflow.
+      setComposingAsset(res.asset);
     } catch (err) {
       setExportError(
-        err instanceof ApiError ? err.message : "PSD export failed.",
+        err instanceof ApiError ? err.message : "Flatten failed.",
       );
     } finally {
       setExporting((prev) => {
@@ -408,6 +412,26 @@ export function DesignStudio({
 
   return (
     <div className="space-y-8">
+      {/* ============ Design-mode banner (slice 10d/e) ============ */}
+      {workspace.design_mode && (
+        <div className="rounded-xl border border-clay-200/70 bg-gradient-to-r from-clay-50/80 to-paper-100/40 px-4 py-3 flex items-start gap-3 shadow-sm">
+          <div className="rounded-full bg-clay-600/15 p-2 mt-0.5 shrink-0">
+            <Wand2 size={16} className="text-clay-700" />
+          </div>
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-ink-900">
+              Design Round mode — designing on the product
+            </p>
+            <p className="text-xs text-ink-600 mt-0.5">
+              Upload the plain product photo + style references, generate
+              label variants <em>shown on the product</em>, iterate until
+              one is right, then hit <strong>Approve &amp; flatten</strong>{" "}
+              to drop it into the Make-print-ready pipeline.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* ============ References panel ============ */}
       <ReferencesPanel
         workspace={workspace}
@@ -626,12 +650,12 @@ export function DesignStudio({
               if (state === "streaming") return;
               enterEditMode(asset);
             }}
-            onExportPsd={handleExportPsd}
+            onMakePrintReady={handleMakePrintReady}
+            onFlatten={workspace.design_mode ? handleFlatten : undefined}
             onExportPdf={handleExportPdf}
             onExportVector={handleExportVector}
             onExportCdr={handleExportCdr}
             cdrEnabled={cdrEnabled}
-            tiers={tiers}
             exporting={exporting}
           />
           {cost && (
@@ -666,7 +690,8 @@ export function DesignStudio({
             workspace={workspace}
             assets={generations}
             onEdit={enterEditMode}
-            onExportPsd={handleExportPsd}
+            onMakePrintReady={handleMakePrintReady}
+            onFlatten={workspace.design_mode ? handleFlatten : undefined}
             onExportPdf={handleExportPdf}
             onExportVector={handleExportVector}
             onExportCdr={handleExportCdr}
@@ -674,7 +699,6 @@ export function DesignStudio({
             isStreaming={state === "streaming"}
             activeBaseId={editBase?.id}
             exporting={exporting}
-            tiers={tiers}
           />
         )}
       </section>
@@ -852,29 +876,23 @@ function StatusStrip({
   );
 }
 
-function VariantsGrid({
-  workspace,
-  variants,
-  onEdit,
-  onExportPsd,
-  onExportPdf,
-  onExportVector,
-  onExportCdr,
-  cdrEnabled,
-  tiers,
-  exporting,
-}: {
-  workspace: Workspace;
-  variants: VariantState[];
+interface VariantActions {
   onEdit: (asset: Asset) => void;
-  onExportPsd: (asset: Asset, tier?: PsdTier) => void;
+  onMakePrintReady: (asset: Asset) => void;
+  /** Slice 10e — only set when workspace.design_mode is true. */
+  onFlatten?: (asset: Asset) => void;
   onExportPdf: (asset: Asset) => void;
   onExportVector: (asset: Asset, provider?: VectorProvider) => void;
   onExportCdr: (asset: Asset, cdrProvider?: CdrProvider) => void;
   cdrEnabled: boolean;
-  tiers: TierAvailability;
   exporting: Record<number, boolean>;
-}) {
+}
+
+function VariantsGrid({
+  workspace,
+  variants,
+  ...actions
+}: { workspace: Workspace; variants: VariantState[] } & VariantActions) {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {variants.map((v) => (
@@ -882,14 +900,7 @@ function VariantsGrid({
           key={v.index}
           workspace={workspace}
           variant={v}
-          onEdit={onEdit}
-          onExportPsd={onExportPsd}
-          onExportPdf={onExportPdf}
-          onExportVector={onExportVector}
-          onExportCdr={onExportCdr}
-          cdrEnabled={cdrEnabled}
-          tiers={tiers}
-          exporting={exporting}
+          {...actions}
         />
       ))}
     </div>
@@ -900,25 +911,14 @@ function VariantTile({
   workspace,
   variant,
   onEdit,
-  onExportPsd,
+  onMakePrintReady,
+  onFlatten,
   onExportPdf,
   onExportVector,
   onExportCdr,
   cdrEnabled,
-  tiers,
   exporting,
-}: {
-  workspace: Workspace;
-  variant: VariantState;
-  onEdit: (asset: Asset) => void;
-  onExportPsd: (asset: Asset, tier?: PsdTier) => void;
-  onExportPdf: (asset: Asset) => void;
-  onExportVector: (asset: Asset, provider?: VectorProvider) => void;
-  onExportCdr: (asset: Asset, cdrProvider?: CdrProvider) => void;
-  cdrEnabled: boolean;
-  tiers: TierAvailability;
-  exporting: Record<number, boolean>;
-}) {
+}: { workspace: Workspace; variant: VariantState } & VariantActions) {
   const partialSrc = variant.partial_b64
     ? `data:image/png;base64,${variant.partial_b64}`
     : null;
@@ -961,12 +961,9 @@ function VariantTile({
       </div>
       {variant.asset && (
         <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <PsdTierMenu
-            tiers={tiers}
-            onPick={(tier) => onExportPsd(variant.asset!, tier)}
-            disabled={!!exporting[variant.asset.id]}
-            isExporting={!!exporting[variant.asset.id]}
-          />
+          {/* Quick raster exports (PDF/SVG/CDR) — straight from the
+              generation PNG. For a fully layered editable PSD, the user
+              clicks "Make print-ready" in the bottom overlay. */}
           <PdfExportButton
             onClick={() => onExportPdf(variant.asset!)}
             disabled={!!exporting[variant.asset.id]}
@@ -995,11 +992,25 @@ function VariantTile({
         </div>
       )}
       {variant.asset && (
-        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-ink-900/85 via-ink-900/40 to-transparent p-3 text-paper-100 opacity-0 group-hover:opacity-100 transition-opacity">
-          <p className="text-xs font-mono opacity-80">{variant.asset.filename}</p>
-          <p className="text-[11px] font-mono opacity-60">
-            ${variant.asset.provider_cost_usd.toFixed(4)} · {variant.asset.image_size}
-          </p>
+        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-ink-900/95 via-ink-900/60 to-transparent p-3 text-paper-100 opacity-0 group-hover:opacity-100 transition-opacity space-y-2">
+          {onFlatten ? (
+            <FlattenButton
+              onClick={() => onFlatten(variant.asset!)}
+              disabled={!!exporting[variant.asset.id]}
+              isExporting={!!exporting[variant.asset.id]}
+            />
+          ) : (
+            <MakePrintReadyButton
+              onClick={() => onMakePrintReady(variant.asset!)}
+              disabled={!!exporting[variant.asset.id]}
+            />
+          )}
+          <div>
+            <p className="text-xs font-mono opacity-80">{variant.asset.filename}</p>
+            <p className="text-[11px] font-mono opacity-60">
+              ${variant.asset.provider_cost_usd.toFixed(4)} · {variant.asset.image_size}
+            </p>
+          </div>
         </div>
       )}
     </div>
@@ -1010,7 +1021,8 @@ function AssetGallery({
   workspace,
   assets,
   onEdit,
-  onExportPsd,
+  onMakePrintReady,
+  onFlatten,
   onExportPdf,
   onExportVector,
   onExportCdr,
@@ -1018,21 +1030,12 @@ function AssetGallery({
   isStreaming,
   activeBaseId,
   exporting,
-  tiers,
 }: {
   workspace: Workspace;
   assets: Asset[];
-  onEdit: (asset: Asset) => void;
-  onExportPsd: (asset: Asset, tier?: PsdTier) => void;
-  onExportPdf: (asset: Asset) => void;
-  onExportVector: (asset: Asset, provider?: VectorProvider) => void;
-  onExportCdr: (asset: Asset, cdrProvider?: CdrProvider) => void;
-  cdrEnabled: boolean;
   isStreaming: boolean;
   activeBaseId?: number;
-  exporting: Record<number, boolean>;
-  tiers: TierAvailability;
-}) {
+} & VariantActions) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-6">
       {assets.map((a) => {
@@ -1070,12 +1073,6 @@ function AssetGallery({
                 isBase || isExporting ? "opacity-100 translate-y-0" : "opacity-0 translate-y-[-4px] group-hover:opacity-100 group-hover:translate-y-0",
               )}
             >
-              <PsdTierMenu
-                tiers={tiers}
-                onPick={(tier) => onExportPsd(a, tier)}
-                disabled={isStreaming || isExporting}
-                isExporting={isExporting}
-              />
               <PdfExportButton
                 onClick={() => onExportPdf(a)}
                 disabled={isStreaming || isExporting}
@@ -1110,7 +1107,19 @@ function AssetGallery({
                 {isBase ? "Editing" : "Edit"}
               </button>
             </div>
-            <div className="p-3.5 bg-white/50 border-t border-ink-100/50 rounded-b-2xl">
+            <div className="p-3.5 bg-white/50 border-t border-ink-100/50 rounded-b-2xl space-y-2">
+              {onFlatten ? (
+                <FlattenButton
+                  onClick={() => onFlatten(a)}
+                  disabled={isStreaming || isExporting}
+                  isExporting={isExporting}
+                />
+              ) : (
+                <MakePrintReadyButton
+                  onClick={() => onMakePrintReady(a)}
+                  disabled={isStreaming || isExporting}
+                />
+              )}
               <div className="flex items-center justify-between gap-2.5">
                 <span className="font-mono text-[10.5px] text-ink-500 truncate">
                   {a.filename}
@@ -1119,7 +1128,7 @@ function AssetGallery({
                   ${a.provider_cost_usd.toFixed(4)}
                 </span>
               </div>
-              <p className="mt-1 text-[9.5px] font-semibold text-ink-400 uppercase tracking-wide">
+              <p className="text-[9.5px] font-semibold text-ink-400 uppercase tracking-wide">
                 {formatDate(a.created_at)} &middot; variant {a.variant_index + 1}
               </p>
             </div>
@@ -1223,143 +1232,58 @@ function CdrExportButton({
   );
 }
 
-function PsdTierMenu({
-  tiers,
-  onPick,
-  disabled,
-  isExporting,
-}: {
-  tiers: TierAvailability;
-  onPick: (tier: PsdTier) => void;
-  disabled: boolean;
-  isExporting: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function onDoc(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    }
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
-
-  return (
-    <div ref={ref} className="relative">
-      <div className="flex">
-        <button
-          type="button"
-          onClick={() => onPick("A")}
-          disabled={disabled}
-          className={cn(
-            "rounded-l-md px-2 py-1 text-[11px] font-medium inline-flex items-center gap-1 transition-colors",
-            "bg-sage-700 text-paper-100 hover:bg-sage-800 border-r border-sage-800/40",
-            disabled && "cursor-not-allowed opacity-60",
-          )}
-          title="Tier A — flat CMYK at 300 DPI"
-        >
-          {isExporting ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <Download size={12} />
-          )}
-          PSD
-        </button>
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          disabled={disabled}
-          className={cn(
-            "rounded-r-md px-1.5 py-1 transition-colors",
-            "bg-sage-700 text-paper-100 hover:bg-sage-800",
-            disabled && "cursor-not-allowed opacity-60",
-          )}
-          aria-label="Choose PSD tier"
-          aria-expanded={open}
-        >
-          <ChevronDown size={12} />
-        </button>
-      </div>
-
-      {open && (
-        <div className="absolute top-full right-0 mt-1 z-20 w-64 rounded-md border border-ink-200 bg-white shadow-card overflow-hidden">
-          <TierMenuItem
-            available={tiers.tier_a}
-            label="Tier A · Flat"
-            description="Single layer, CMYK, 300 DPI"
-            icon={<Download size={14} />}
-            onClick={() => {
-              setOpen(false);
-              onPick("A");
-            }}
-          />
-          <TierMenuItem
-            available={tiers.tier_a_ocr}
-            label="Tier A+OCR · Editable text"
-            description={
-              tiers.tier_a_ocr
-                ? "Flat + Tesseract text overlays + .ocr.json sidecar"
-                : "Enable Tesseract + Tier A+OCR toggle in Settings"
-            }
-            icon={<Type size={14} />}
-            onClick={() => {
-              setOpen(false);
-              if (tiers.tier_a_ocr) onPick("A+OCR");
-            }}
-          />
-          <TierMenuItem
-            available={true}
-            label="Composable · Best quality"
-            description="Per-element regeneration into a multi-layered editable PSD. Opens designer flow."
-            icon={<Sparkles size={14} />}
-            onClick={() => {
-              setOpen(false);
-              onPick("COMPOSABLE");
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TierMenuItem({
-  available,
-  label,
-  description,
-  icon,
+function MakePrintReadyButton({
   onClick,
+  disabled,
 }: {
-  available: boolean;
-  label: string;
-  description: string;
-  icon: React.ReactNode;
   onClick: () => void;
+  disabled: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={!available}
+      disabled={disabled}
       className={cn(
-        "block w-full text-left px-3 py-2.5 border-b border-ink-100 last:border-0 transition-colors",
-        available
-          ? "hover:bg-paper-100 cursor-pointer"
-          : "opacity-50 cursor-not-allowed",
+        "w-full inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-bold uppercase tracking-wider transition-all duration-200 shadow-md",
+        "bg-gradient-to-r from-clay-600 to-clay-700 text-paper-100 hover:from-clay-700 hover:to-clay-800",
+        disabled && "cursor-not-allowed opacity-60",
       )}
+      title="Analyse this design → review elements → assemble multi-layered editable PSD + SVG + PDF"
     >
-      <div className="flex items-center gap-2 text-ink-900 text-sm font-medium">
-        <span className="text-clay-600">{icon}</span>
-        {label}
-        {!available && (
-          <span className="ml-auto text-[10px] uppercase tracking-wider text-ink-400">
-            unavailable
-          </span>
-        )}
-      </div>
-      <p className="mt-0.5 text-xs text-ink-500 ml-5">{description}</p>
+      <Layers size={13} />
+      Make print-ready
+    </button>
+  );
+}
+
+function FlattenButton({
+  onClick,
+  disabled,
+  isExporting,
+}: {
+  onClick: () => void;
+  disabled: boolean;
+  isExporting: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={cn(
+        "w-full inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[11px] font-bold uppercase tracking-wider transition-all duration-200 shadow-md",
+        "bg-gradient-to-r from-sage-700 to-sage-800 text-paper-100 hover:from-sage-800 hover:to-sage-900",
+        disabled && "cursor-not-allowed opacity-60",
+      )}
+      title="Approve this design and flatten it to a clean rectangular label, then jump into the Make print-ready review"
+    >
+      {isExporting ? (
+        <Loader2 size={13} className="animate-spin" />
+      ) : (
+        <CheckCircle2 size={13} />
+      )}
+      Approve & flatten
     </button>
   );
 }

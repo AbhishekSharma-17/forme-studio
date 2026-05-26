@@ -65,6 +65,28 @@ class WorkspaceCreate(BaseModel):
         description="Optional override; otherwise derived from `name`.",
         max_length=80,
     )
+    design_mode: bool = Field(
+        default=False,
+        description=(
+            "Workflow entry point. False (default) = 'analyze-existing' — "
+            "user uploads a finished label and we recreate it component-by-"
+            "component. True = 'design-on-product' — user uploads a plain "
+            "product photo + style references + brief, the studio runs a "
+            "brainstorm round designing the label on the product first."
+        ),
+    )
+
+
+class WorkspaceUpdate(BaseModel):
+    """Partial update body for ``PATCH /api/packaging/workspaces/{slug}``.
+
+    Only safe, non-frozen fields are mutable. Trim/bleed/DPI live in
+    ``specs`` and are intentionally immutable after creation.
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    design_mode: bool | None = None
 
 
 class WorkspaceOut(BaseModel):
@@ -77,6 +99,7 @@ class WorkspaceOut(BaseModel):
     product_type: str
     description: str | None
     specs: dict[str, Any]
+    design_mode: bool = False
     created_at: datetime
     updated_at: datetime
     folder_path: str
@@ -136,50 +159,6 @@ class ReferenceUploadResponse(BaseModel):
 
     references: list[AssetOut]
     total: int
-
-
-class PsdExportRequest(BaseModel):
-    """Body for ``POST /workspaces/{slug}/exports/psd``.
-
-    Tier selects the export pipeline:
-
-      * ``A`` — flat single-layer PSD. Always available.
-      * ``A+OCR`` — Tier A plus Tesseract-detected text-region overlays
-        (each layer named with the detected text) + a JSON sidecar.
-        Requires Tesseract on PATH **and** ``FORME_TIER_C_ENABLED=true``.
-
-    For a fully multi-layered editable PSD with every visual element as
-    its own layer, see ``POST /exports/psd-composable``.
-    """
-
-    source_asset_id: int = Field(
-        ..., description="Generation asset to wrap as PSD."
-    )
-    tier: str = Field(
-        "A", description="'A' (flat) or 'A+OCR' (flat + text overlays)."
-    )
-    color_space: str = Field(
-        "CMYK",
-        description="'CMYK' (default, press-ready) or 'RGB' (preserve original).",
-    )
-    dpi: int = Field(
-        300, ge=72, le=1200, description="Resolution baked into PSD metadata."
-    )
-
-
-class PsdExportResponse(BaseModel):
-    """Response body for the PSD export endpoint."""
-
-    asset: AssetOut
-    source_asset_id: int
-    tier: str
-    color_space: str
-    dpi: int
-    width: int
-    height: int
-    layer_count: int
-    sidecar_url: str | None = None
-    text_layer_count: int | None = None
 
 
 class PdfExportRequest(BaseModel):
@@ -257,6 +236,12 @@ class ElementSpecOut(BaseModel):
     position_mm: list[float]            # [x, y, w, h]
     size_px: str
     kind: str
+    # New in slice 10a — text + confidence are only set for kind="text"
+    # (OCR-discovered); vectorizable is a hint from the analyzer to drive
+    # selective auto-vectorization in Phase 3 (slice 10c).
+    text: str | None = None
+    confidence: float | None = None
+    vectorizable: bool = False
 
 
 class ComposeDiscoverRequest(BaseModel):
@@ -282,6 +267,10 @@ class ComposeDiscoverResponse(BaseModel):
     trim_mm: dict[str, float]
     elements: list[ElementSpecOut]
     discovery_cost_usd: float
+    # New in slice 10a — surfaces whether OCR ran. The UI uses this to
+    # decide whether to nudge the user about missing text elements.
+    ocr_available: bool = True
+    ocr_lang: str | None = None
 
 
 class ComposeAssembleRequest(BaseModel):
@@ -300,6 +289,17 @@ class ComposeAssembleRequest(BaseModel):
     )
     dpi: int = Field(300, ge=72, le=1200)
     color_space: str = Field("CMYK", description="'CMYK' (press) or 'RGB'.")
+    vectorize: bool = Field(
+        True,
+        description=(
+            "Auto-vectorize line-art elements (logos, wordmarks, ornaments) "
+            "during assembly so the composable SVG is print-quality. "
+            "Photo illustrations stay raster regardless. Set False to skip "
+            "the Vectorizer.AI calls entirely (~$0.80-1.20 saving per "
+            "sticker; the SVG export still works but every element is "
+            "embedded as a raster <image>)."
+        ),
+    )
 
 
 class ComposeElementOut(BaseModel):
@@ -326,6 +326,46 @@ class ComposeAssembleResponse(BaseModel):
     color_space: str
     width_px: int
     height_px: int
+    # New in slice 10c: the assembled SVG is produced as a sibling export
+    # alongside the PSD. URL serves the file from the workspace's
+    # exports/ folder; counts let the UI explain "X vector / Y raster".
+    svg_asset_id: int | None = None
+    svg_url: str | None = None
+    svg_vector_count: int = 0
+    svg_raster_count: int = 0
+    vector_cost_usd: float = 0.0
+
+
+class DesignFlattenRequest(BaseModel):
+    """Body for ``POST /workspaces/{slug}/design/flatten`` (slice 10e).
+
+    Takes the user's approved bottle-mockup variant from the Design
+    Round and re-renders it as a clean flat label on white, ready to
+    feed into the analyze + assemble pipeline.
+    """
+
+    source_asset_id: int = Field(
+        ...,
+        description=(
+            "The approved generation from the design round — typically "
+            "shows the label on the product. We'll edit-flatten it to a "
+            "clean rectangular label PNG at the workspace's trim dims."
+        ),
+    )
+    quality: str = Field(
+        "high",
+        description="gpt-image-2 quality for the flatten pass.",
+    )
+
+
+class DesignFlattenResponse(BaseModel):
+    """Response body for the flatten call."""
+
+    asset: AssetOut
+    source_asset_id: int
+    flattened_from: int
+    provider_cost_usd: float
+    user_cost_usd: float
 
 
 class WorkspaceDeleteRequest(BaseModel):

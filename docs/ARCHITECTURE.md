@@ -274,74 +274,121 @@ values.
 
 ---
 
-## 12. PSD tiers
+## 12. Unified Make-print-ready pipeline (slice 10)
 
-Two tier strategies share the flat-PSD endpoint
-(`POST /api/packaging/workspaces/{slug}/exports/psd`, body
-`{source_asset_id, tier, color_space, dpi}`):
+The headline action per variant. One endpoint pair drives the whole
+flow:
 
-| Tier | Layers | Requires |
-| --- | --- | --- |
-| **A** | 1 (flat) | always available |
-| **A+OCR** | 1 base + M text-region overlays + JSON sidecar | Tesseract on PATH + `FORME_TIER_C_ENABLED=true` |
+- `POST /workspaces/{slug}/compose/discover` → unified manifest
+  (graphic elements from Vision + text elements from OCR, merged +
+  sorted top-to-bottom)
+- `POST /workspaces/{slug}/exports/psd-composable` → layered CMYK PSD
+  + sibling vector SVG composite
 
-Tier A+OCR runs the full OCR pipeline (`app/services/ocr.py` via
-`pytesseract`) over the source PNG, then for each detected region with
-confidence ≥ 60 it adds a thin pixel layer whose **name encodes the
-detected text + position** (e.g. `text: "IMARA Sandalwood" @412,180`).
-A sidecar `.ocr.json` is written next to the PSD and registered as a
-second `Asset(kind="export")` with mime `application/json` so
-downstream automations don't have to parse layer names.
+### Phase 1 — Analyse
 
-For a fully multi-layered editable PSD — every visual element as its
-own named layer — see the **Composable PSD** pipeline below
-(`POST /workspaces/{slug}/exports/psd-composable`).
+`app/services/analyze.py` orchestrates two independent passes in one
+call:
 
-`/api/health` exposes a `tiers: {tier_a, tier_a_ocr}` block — the UI
-uses it to grey out unavailable choices in the PSD dropdown rather than
-letting the user fire a request that 503s.
+```
+            ┌───────────────────────────────────────────┐
+input PNG → │ vision.discover_elements (GPT-4o-mini) ──┐│
+            │                                          ▼│   merge +
+            │ ocr.extract (Tesseract) ─────────────────┼─→ sort y,x →
+            │                                          ▲│   manifest
+            │                                          ││
+            └──────────────────────────────────────────┘│
+```
 
-## 12a. Composable PSD — multi-layered editable export
+The OCR pass collapses per-word records into block-level entries via
+``_merge_lines_into_blocks`` (lookback merge that respects gap-vs-
+median-line-height and horizontal column overlap). Each block becomes
+an ``ElementSpec(kind="text")`` with the OCR'd string + confidence so
+the review UI can flag low-confidence text.
 
-Endpoint pair:
+If Tesseract isn't installed, the analyzer returns graphic elements
+only and the response carries ``ocr_available=false`` — the UI lets
+the user add text blocks manually.
 
-- `POST /workspaces/{slug}/compose/discover` →
-  `{elements: [{name, label, prompt, position_mm, size_px, kind}…]}`
-- `POST /workspaces/{slug}/exports/psd-composable` → assembled PSD
+### Phase 2 — Review
 
-**Why generate-then-assemble, not segment-then-slice.** Slicing pixels
-out of the approved generation loses resolution and breaks the
-transparency story (you'd need alpha matting on every cut). Instead we
-let gpt-image-2 re-render each element fresh at the right size, on a
-transparent canvas. The cost is N image-gen calls (≈ $0.02–$0.10 each
-at high quality); the gain is a Photoshop file where every flower,
-logo, and ornament is a clean, alpha-correct layer the designer can
-swap or restyle without touching the others.
+The frontend dialog renders one row per element. Graphic rows let the
+designer edit the prompt; text rows let them edit the actual string
+content (with a yellow chip when OCR confidence < 75%). Any element
+can be removed; missing ones can be added (graphic or text via two
+"+" buttons).
 
-**Element discovery** (`app/services/vision.py`) sends the source PNG
-to `gpt-4o-mini` with a strict JSON-schema response prompt. The
-returned manifest carries: element name (machine-friendly slug),
-label (human-friendly title), per-element generation prompt, target
-position in mm, target size_px (one of the three gpt-image-2 sizes),
-and a kind enum (`graphic | wordmark | headline | ornament | seal |
-body_copy`). The frontend renders this for review — the designer
-edits prompts, removes/adds elements, hits *Generate + assemble*.
+### Phase 3 — Assemble
 
-**Assembly** (`app/services/compose.py`) builds a base CMYK canvas at
-trim + 2 × bleed, then for each element opens the transparent PNG,
-Lanczos-resizes to its `position_mm × dpi`, and pastes it as a named
-PixelLayer at the top-left offset. The element's `name` becomes the
-Photoshop layer name verbatim — `imara_wordmark`,
-`sandalwood_botanical`, etc.
+`app/services/compose.py` is the only PSD producer left in the system.
+Per-element routing:
 
-**`body_copy` elements are skipped** during per-element generation —
-dense regulatory copy garbles in image-gen, so we route it through
-Tier A+OCR instead. If every element in the manifest is `body_copy`,
-the assemble endpoint returns 422 with a hint.
+| `kind`                              | Renderer                  | Vectorized? |
+| ----------------------------------- | ------------------------- | ----------- |
+| `graphic`                           | gpt-image-2 transparent   | if `vectorizable=true` |
+| `wordmark` / `ornament` / `seal`    | gpt-image-2 transparent   | always      |
+| `headline`                          | gpt-image-2 transparent   | no          |
+| `text`                              | Pillow text rasteriser    | no (already crisp) |
+| `body_copy`                         | skipped                   | n/a         |
 
-Audit row: `export.psd.composable.created` carries the element count,
-layer count, total generation cost, and the full element manifest so
-the JSONL is enough to reconstruct what was generated and how.
+Text-element rendering (`_render_text_element`): builds a transparent
+RGBA canvas at the element's `size_px`, walks a font-discovery chain
+(bundled DejaVu → system Helvetica → Linux DejaVu → Pillow default),
+binary-searches the font size to fit the longest line within 95% of
+the canvas width, centres the text, rasterises.
+
+Selective auto-vectorization (`maybe_vectorize_element`): if
+`_should_vectorize(spec)` returns true, the per-element PNG goes
+through `app.services.vector.vectorize`. Failures degrade gracefully
+to raster — never abort the assemble.
+
+The PSD assembly composes elements as `PixelLayer`s at `position_mm
+× dpi` offsets relative to the trim+bleed canvas. Text layer names
+carry the `[type:"<actual text>"]` suffix so a Photoshop-script pass
+can later auto-convert pixel → type.
+
+The SVG assembly (`assemble_composable_svg`) emits a `<svg
+viewBox="0 0 W_mm H_mm">` document where each element is either:
+
+- An inline `<g transform="translate(x,y) scale(...)">` containing
+  the per-element SVG paths (vectorized elements), or
+- An `<image href="data:image/png;base64,...">` at the element's
+  mm bounding box (raster elements).
+
+Mixing vector + raster gives clean lines on logos and ornaments while
+preserving photographic fidelity on illustrations — exactly the trade
+the user agreed to in slice 10 planning.
+
+### Phase 4 — Export cascade
+
+The Composable endpoint writes both the PSD (master) and the SVG
+sibling, each as their own `Asset(kind="export")` rows. PDF/X-4 and
+CDR exports still operate on the original generation PNG via their
+own dedicated endpoints (one-click buttons on each variant); they
+intentionally don't go through Make print-ready because they're
+quick raster exports, not high-quality multi-layer assemblies.
+
+Audit shape: `export.psd.composable.created` carries the element
+count, layer count, total generation cost, vectorization cost, and
+the full per-element manifest. `export.svg.composable.created` is
+written as a sibling event with vector/raster counts.
+
+### Workspace `design_mode` toggle (slice 10d / 10e)
+
+A boolean on `Workspace` chooses the entry framing:
+
+- **False (default)** — "Analyze-existing" mode. User uploads a
+  finished label; Make print-ready runs straight on it.
+- **True** — "Design-on-product" mode. User uploads a plain product
+  photo + style references + brief; the studio runs an initial Design
+  Round generating label variants shown on the product. Once a
+  variant is approved, `POST /workspaces/{slug}/design/flatten`
+  re-runs gpt-image-2 with a fixed "render flat, no bottle, no
+  perspective" prompt — output is a clean rectangular sticker that
+  feeds the analyze pass.
+
+The toggle is mutable post-creation via
+`PATCH /workspaces/{slug}` — the studio can flip modes mid-flight.
 
 ## 13. Print PDF/X-4
 

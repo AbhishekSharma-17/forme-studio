@@ -213,8 +213,7 @@ def test_writable_keys_covers_all_active_fields() -> None:
         "FORME_CDR_TIMEOUT_S",
         "FORME_CLOUDCONVERT_SANDBOX",
         "FORME_UNICONVERTOR_PATH",
-        # Tier A+OCR (env name kept for back-compat)
-        "FORME_TIER_C_ENABLED",
+        # OCR
         "FORME_TESSERACT_CMD",
         "FORME_TESSERACT_LANG",
     }

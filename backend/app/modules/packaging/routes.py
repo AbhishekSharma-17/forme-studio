@@ -29,6 +29,8 @@ from app.modules.packaging.schemas import (
     ComposeDiscoverRequest,
     ComposeDiscoverResponse,
     ComposeElementOut,
+    DesignFlattenRequest,
+    DesignFlattenResponse,
     EditRequest,
     ElementSpecOut,
     GenerateRequest,
@@ -38,8 +40,6 @@ from app.modules.packaging.schemas import (
     PdfExportResponse,
     ProductTypeCreate,
     ProductTypeUpdate,
-    PsdExportRequest,
-    PsdExportResponse,
     ReferenceUploadResponse,
     VectorExportRequest,
     VectorExportResponse,
@@ -47,9 +47,11 @@ from app.modules.packaging.schemas import (
     WorkspaceDeleteRequest,
     WorkspaceDeleteResponse,
     WorkspaceOut,
+    WorkspaceUpdate,
 )
 from app.services import audit
 from app.services import product_types as product_types_service
+from app.services.analyze import analyze as run_analyze
 from app.services.assets import (
     absolute_path,
     save_export,
@@ -59,8 +61,11 @@ from app.services.assets import (
 from app.services.compose import (
     GeneratedElement,
     assemble_composable_psd,
+    assemble_composable_svg,
     derive_composable_filename,
+    derive_composable_svg_filename,
     generate_element,
+    maybe_vectorize_element,
 )
 from app.services.export_cdr import (
     convert_svg_to_cdr,
@@ -74,15 +79,13 @@ from app.services.export_pdf import (
 from app.services.export_pdf import (
     export_to_pdf,
 )
-from app.services.export_psd import (
-    derive_export_filename,
-    export_to_psd,
-    export_to_psd_a_ocr,
-)
+
+# Note: app.services.export_psd was removed in slice 10g. The Composable
+# pipeline (compose.py) is the only PSD producer in the system. PDF / SVG
+# / CDR direct exports operate on the raw generation PNG and live in
+# their own service modules below.
 from app.services.filesystem import ensure_workspace_dir, slugify, workspace_root
 from app.services.image_normalize import NormalizeError, normalize
-from app.services.ocr import OcrUnavailableError
-from app.services.ocr import extract as ocr_extract
 from app.services.openai_image import (
     FileTuple,
     b64_to_bytes,
@@ -98,7 +101,7 @@ from app.services.vector import (
 from app.services.vector import (
     vectorize as run_vectorize,
 )
-from app.services.vision import ElementSpec, discover_elements
+from app.services.vision import ElementSpec
 
 # Reference-upload guardrails. The model's hard cap is 16 references per
 # call, so we accept up to 16 per *upload* batch too.
@@ -249,6 +252,7 @@ async def create_workspace(
         # never mutate this row.
         specs=product_types_service.to_specs(pt),
         description=body.description,
+        design_mode=body.design_mode,
     )
     session.add(ws)
     session.flush()
@@ -264,6 +268,7 @@ async def create_workspace(
             "name": body.name,
             "product_type": body.product_type,
             "specs": ws.specs,
+            "design_mode": body.design_mode,
             "folder": str(folder),
         },
     )
@@ -299,6 +304,53 @@ async def list_workspaces(
 async def get_workspace(
     workspace: Workspace = Depends(resolve_workspace),
 ) -> WorkspaceOut:
+    return _workspace_to_out(workspace)
+
+
+@router.patch(
+    "/workspaces/{slug}",
+    response_model=WorkspaceOut,
+    summary="Update mutable workspace fields (name, description, design_mode)",
+)
+async def update_workspace(
+    body: WorkspaceUpdate,
+    workspace: Workspace = Depends(resolve_workspace),
+    session: Session = Depends(get_session),
+) -> WorkspaceOut:
+    """Patch a small allow-list of workspace fields.
+
+    Specs (trim/bleed/DPI/colour space) are intentionally frozen at
+    creation time and cannot be modified — Forme's "anchor every export
+    to the same forme" guarantee depends on this immutability. The
+    fields here are pure UX state (display name, free-text description,
+    design-mode toggle).
+    """
+    changed: dict[str, Any] = {}
+    payload = body.model_dump(exclude_unset=True)
+    for field in ("name", "description", "design_mode"):
+        if field in payload:
+            new_value = payload[field]
+            if new_value != getattr(workspace, field):
+                changed[field] = {
+                    "from": getattr(workspace, field),
+                    "to": new_value,
+                }
+                setattr(workspace, field, new_value)
+
+    if not changed:
+        return _workspace_to_out(workspace)
+
+    workspace.updated_at = datetime.now(UTC)
+    audit.record(
+        session,
+        event="workspace.updated",
+        workspace_id=workspace.id,
+        workspace_slug=workspace.slug,
+        payload={"changed": changed},
+    )
+    session.commit()
+    session.refresh(workspace)
+    log.info("workspace_updated", slug=workspace.slug, keys=list(changed.keys()))
     return _workspace_to_out(workspace)
 
 
@@ -848,180 +900,13 @@ async def upload_references(
 
 
 # --------------------------------------------------------------------- exports
-@router.post(
-    "/workspaces/{slug}/exports/psd",
-    response_model=PsdExportResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Export a generation as PSD — Tier A flat or Tier A+OCR with editable text overlays",
-)
-async def export_psd(
-    body: PsdExportRequest,
-    workspace: Workspace = Depends(resolve_workspace),
-    session: Session = Depends(get_session),
-) -> PsdExportResponse:
-    """Wrap a generation PNG in a Photoshop file with workspace print specs.
-
-    * **Tier A** — single flat layer in the requested colour space.
-    * **Tier A+OCR** — Tier A plus one named layer per Tesseract-detected
-      text region + a JSON sidecar.
-
-    For a multi-layered editable PSD with every visual element as its
-    own transparent layer, see the Composable PSD endpoint at
-    ``/exports/psd-composable``.
-    """
-    if body.color_space.upper() not in {"CMYK", "RGB"}:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"color_space must be 'CMYK' or 'RGB', got '{body.color_space}'.",
-        )
-    color_space = body.color_space.upper()
-
-    # Normalise tier — accept "A+OCR" / "A_OCR" / "OCR" all → "A+OCR"
-    raw_tier = body.tier.upper().replace("_", "+").replace(" ", "")
-    if raw_tier == "OCR":
-        raw_tier = "A+OCR"
-    tier = raw_tier
-    if tier not in {"A", "A+OCR"}:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"tier must be 'A' or 'A+OCR', got '{body.tier}'."
-            ),
-        )
-
-    settings = get_settings()
-    # Tier A+OCR shares the OCR-enabled toggle.
-    if tier == "A+OCR" and not settings.tier_c_enabled:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Tier A+OCR requires OCR which is disabled. Enable "
-                "FORME_TIER_C_ENABLED=true in your .env (or toggle in "
-                "Settings → PSD tiers)."
-            ),
-        )
-
-    source = _resolve_asset(session, workspace, body.source_asset_id, "source_asset_id")
-    if source.kind != "generation":
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=(
-                f"Can only export 'generation' assets to PSD; "
-                f"asset {body.source_asset_id} is '{source.kind}'."
-            ),
-        )
-
-    out_path = (
-        workspace_root(workspace.slug)
-        / "exports"
-        / derive_export_filename(source.id or 0)
-    )
-
-    source_path = absolute_path(workspace, source)
-    ocr_result = None
-
-    try:
-        if tier == "A":
-            result = export_to_psd(
-                source_png_path=source_path,
-                out_path=out_path,
-                color_space=color_space,  # type: ignore[arg-type]
-                dpi=body.dpi,
-            )
-        else:  # tier == "A+OCR"
-            try:
-                ocr_result = ocr_extract(source_path.read_bytes())
-            except OcrUnavailableError as exc:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
-                ) from exc
-            result = export_to_psd_a_ocr(
-                source_png_path=source_path,
-                out_path=out_path,
-                ocr=ocr_result,
-                color_space=color_space,  # type: ignore[arg-type]
-                dpi=body.dpi,
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.exception(
-            "psd_export_failed",
-            workspace=workspace.slug,
-            source=source.id,
-            tier=tier,
-        )
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Tier {tier} PSD export failed: {exc}",
-        ) from exc
-
-    payload_extra: dict[str, Any] = {
-        "color_space": result.color_space,
-        "dpi": result.dpi,
-        "width": result.width,
-        "height": result.height,
-        "tier": result.tier,
-        "layer_count": result.layer_count,
-    }
-    if ocr_result is not None:
-        payload_extra["text_region_count"] = len(ocr_result.regions)
-        payload_extra["ocr_lang"] = ocr_result.lang
-
-    # Audit event slug: "a" → tier_a, "a+ocr" → tier_a_ocr (FS-friendly).
-    tier_slug = result.tier.lower().replace("+", "_")
-    asset = save_export(
-        session,
-        workspace,
-        source_asset_id=source.id or 0,
-        out_path=result.path,
-        mime_type="image/vnd.adobe.photoshop",
-        payload_extra=payload_extra,
-        audit_event=f"export.psd.tier_{tier_slug}.created",
-    )
-
-    # Register the OCR sidecar (Tier A+OCR only) as a separate audit row
-    # so downstream automations can find it via the audit trail.
-    sidecar_url = None
-    if result.sidecar_path is not None and result.sidecar_path.exists():
-        try:
-            sidecar_asset = save_export(
-                session,
-                workspace,
-                source_asset_id=source.id or 0,
-                out_path=result.sidecar_path,
-                mime_type="application/json",
-                payload_extra={"of_psd_asset_id": asset.id, "kind": "ocr_sidecar"},
-                audit_event="export.psd.ocr_sidecar.saved",
-            )
-            sidecar_url = f"/api/packaging/workspaces/{workspace.slug}/assets/{sidecar_asset.id}/file"
-        except ValueError:
-            log.warning("sidecar_save_failed", path=str(result.sidecar_path))
-
-    log.info(
-        "psd_exported",
-        workspace=workspace.slug,
-        source_asset_id=source.id,
-        export_asset_id=asset.id,
-        tier=result.tier,
-        color_space=result.color_space,
-        dpi=result.dpi,
-        layer_count=result.layer_count,
-    )
-    return PsdExportResponse(
-        asset=_asset_to_out(asset, workspace),
-        source_asset_id=source.id or 0,
-        tier=result.tier,
-        color_space=result.color_space,
-        dpi=result.dpi,
-        width=result.width,
-        height=result.height,
-        layer_count=result.layer_count,
-        sidecar_url=sidecar_url,
-        text_layer_count=(
-            len(ocr_result.regions) if ocr_result is not None else None
-        ),
-    )
+# NOTE (slice 10): The legacy ``POST /exports/psd`` endpoint (Tier A flat
+# / Tier A+OCR) was removed. ``POST /exports/psd-composable`` is the only
+# PSD producer — it analyses the source (graphics via Vision + text via
+# OCR), regenerates each element on a transparent canvas, optionally
+# vectorizes line art, and assembles a multi-layered editable PSD plus a
+# sibling SVG composite. PDF and CDR direct raster exports remain below
+# for quick proofs straight off the generation PNG.
 
 
 # --------------------------------------------------------------- PDF export
@@ -1287,6 +1172,154 @@ async def export_cdr(
     )
 
 
+# ─────────────────────────────────────────────────── Design Round (slice 10e)
+@router.post(
+    "/workspaces/{slug}/design/flatten",
+    response_model=DesignFlattenResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Flatten an approved bottle-mockup variant into a clean label PNG",
+)
+async def design_flatten(
+    body: DesignFlattenRequest,
+    workspace: Workspace = Depends(resolve_workspace),
+    session: Session = Depends(get_session),
+    client: AsyncOpenAI = Depends(get_openai_client),
+) -> DesignFlattenResponse:
+    """Extract the label design from a Design-Round variant.
+
+    Workflow B (``workspace.design_mode=True``) is:
+
+      1. User uploads plain product photo + style refs + brief.
+      2. They iterate variants of the label shown ON the product (the
+         bottle-mockup output of gpt-image-2 with both refs as input).
+      3. Once a variant is approved, this endpoint re-renders the same
+         design as a clean, flat, rectangular sticker on white
+         background — ready to feed into the analyze + assemble
+         pipeline like any other generation.
+
+    Implementation: a gpt-image-2 ``images.edit`` call with the approved
+    mockup as the sole input and a fixed instruction-prompt.
+    """
+    settings = get_settings()
+    if not workspace.design_mode:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail=(
+                "Workspace is not in design_mode — the flatten endpoint is "
+                "only meaningful for the brainstorm-on-product workflow. "
+                "Flip design_mode=true via PATCH /workspaces/{slug} first."
+            ),
+        )
+
+    source = _resolve_asset(session, workspace, body.source_asset_id, "source_asset_id")
+    if source.kind != "generation":
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Can only flatten 'generation' assets; asset "
+                f"{body.source_asset_id} is '{source.kind}'."
+            ),
+        )
+
+    size = _generation_size(workspace)
+    specs = workspace.specs or {}
+    trim = specs.get("trim_mm") or {}
+    try:
+        trim_w = float(trim["w"])
+        trim_h = float(trim["h"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Workspace '{workspace.slug}' is missing frozen trim specs.",
+        ) from exc
+
+    flatten_prompt = (
+        "Render this exact label design as a flat, rectangular sticker "
+        f"at {trim_w:.0f} × {trim_h:.0f} mm on a clean white background. "
+        "Remove the bottle, product, or any 3D context entirely. "
+        "No perspective, no shadow, no curvature, no specular highlights. "
+        "The output must be print-ready flat artwork as if it were the "
+        "die-cut sticker laid flat on a scanner. Preserve every typographic "
+        "and illustrative element of the design unchanged — same colours, "
+        "same fonts, same composition — only the surrounding bottle / "
+        "product context is removed."
+    )
+
+    try:
+        ref_image: FileTuple = _asset_to_filetuple(workspace, source)
+        result = await edit(
+            client,
+            model=settings.openai_image_model,
+            prompt=flatten_prompt,
+            images=[ref_image],
+            size=size,
+            quality=body.quality,
+            n=1,
+            timeout=settings.image_generation_timeout_s,
+        )
+    except Exception as exc:
+        log.exception(
+            "design_flatten_failed",
+            workspace=workspace.slug,
+            source=source.id,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail=f"Flatten edit failed: {exc}",
+        ) from exc
+
+    if not result["images_b64"]:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail="OpenAI returned no flattened image.",
+        )
+
+    flattened = save_generation(
+        session,
+        workspace,
+        image_bytes=b64_to_bytes(result["images_b64"][0]),
+        prompt=f"[flatten] from asset {source.id}",
+        model=settings.openai_image_model,
+        size=size,
+        quality=body.quality,
+        variant_index=0,
+        usage=result["usage"],
+        reference_ids=[source.id] if source.id else None,
+        commit=False,
+    )
+    audit.record(
+        session,
+        event="asset.flattened",
+        workspace_id=workspace.id,
+        workspace_slug=workspace.slug,
+        payload={
+            "new_asset_id": flattened.id,
+            "flattened_from": source.id,
+            "quality": body.quality,
+        },
+    )
+    session.commit()
+    session.refresh(flattened)
+
+    provider_cost = cost_from_usage(result["usage"])
+    user_cost = apply_markup(provider_cost, settings.pricing_markup_percent)
+
+    log.info(
+        "design_flattened",
+        workspace=workspace.slug,
+        source_asset_id=source.id,
+        new_asset_id=flattened.id,
+        cost_usd=provider_cost,
+    )
+    return DesignFlattenResponse(
+        asset=_asset_to_out(flattened, workspace),
+        source_asset_id=flattened.id or 0,
+        flattened_from=source.id or 0,
+        provider_cost_usd=provider_cost,
+        user_cost_usd=user_cost,
+    )
+
+
 # ─────────────────────────────────────────────────────────── Composable PSD
 @router.post(
     "/workspaces/{slug}/compose/discover",
@@ -1332,7 +1365,7 @@ async def compose_discover(
         ) from exc
 
     image_bytes = absolute_path(workspace, source).read_bytes()
-    specs_list = await discover_elements(
+    analysis = await run_analyze(
         client,
         image_bytes,
         trim_mm=(trim_w, trim_h),
@@ -1343,16 +1376,21 @@ async def compose_discover(
         "compose_discovered",
         workspace=workspace.slug,
         source_asset_id=source.id,
-        element_count=len(specs_list),
+        element_count=len(analysis.elements),
+        graphic_count=sum(1 for e in analysis.elements if e.kind != "text"),
+        text_count=sum(1 for e in analysis.elements if e.kind == "text"),
+        ocr_available=analysis.ocr_available,
     )
     return ComposeDiscoverResponse(
         source_asset_id=source.id or 0,
         trim_mm={"w": trim_w, "h": trim_h},
-        elements=[ElementSpecOut(**s.to_dict()) for s in specs_list],
+        elements=[ElementSpecOut(**s.to_dict()) for s in analysis.elements],
         # GPT-4o-mini vision ~$0.001-0.005 per call; we don't surface
         # exact tokens (the chat-completions response doesn't carry the
         # same usage shape as images). Reported as 0 for now.
         discovery_cost_usd=0.0,
+        ocr_available=analysis.ocr_available,
+        ocr_lang=analysis.ocr_lang,
     )
 
 
@@ -1375,8 +1413,8 @@ async def compose_assemble(
     ``body.elements`` is the final manifest after the user reviewed +
     edited + added missing items. ``kind="body_copy"`` elements are
     skipped during per-element generation — the assumption is the user
-    will handle dense regulatory copy via the Tier A+OCR pipeline
-    instead (cheaper, no garbled small print risk).
+    will route those to the OCR-text rows in the unified manifest
+    instead.
     """
     settings = get_settings()
     source = _resolve_asset(session, workspace, body.source_asset_id, "source_asset_id")
@@ -1401,20 +1439,37 @@ async def compose_assemble(
             detail=f"Workspace '{workspace.slug}' is missing trim/bleed specs.",
         ) from exc
 
-    # Filter out body_copy elements — those route to OCR, not gpt-image-2.
+    # Skip body_copy elements — those route to the unified OCR pass and
+    # come back as kind="text" instead. text elements DO get rendered
+    # (via Pillow in compose.generate_element). Anything else routes to
+    # gpt-image-2 with transparent_background=True.
     renderable = [e for e in body.elements if e.kind != "body_copy"]
     if not renderable:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
-                "No renderable elements in the manifest (everything was "
-                "'body_copy', which is handled by Tier A+OCR instead)."
+                "No renderable elements in the manifest. Add at least one "
+                "graphic or text element before assembling."
             ),
         )
 
-    # Generate each element sequentially. FastAPI's single-process worker
-    # makes parallelism cheap to defer; sequential keeps OpenAI rate
-    # limiting predictable.
+    # Text elements must carry their actual content. Reject early with a
+    # clear error rather than failing deep inside the renderer.
+    missing_text = [
+        e.name for e in renderable if e.kind == "text" and not (e.text or "").strip()
+    ]
+    if missing_text:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Text elements are missing content: {', '.join(missing_text)}. "
+                "Edit each row in the review dialog before assembling."
+            ),
+        )
+
+    # Generate each element sequentially, then optionally vectorize it
+    # in-place. Sequential keeps OpenAI rate limiting predictable;
+    # FastAPI's single-process worker makes parallelism cheap to defer.
     generated: list[GeneratedElement] = []
     try:
         for elem_spec in renderable:
@@ -1425,6 +1480,11 @@ async def compose_assemble(
                 model=settings.openai_image_model,
                 quality=body.quality,
             )
+            # Selective auto-vectorization (slice 10c). The policy lives
+            # in compose._should_vectorize: line-art kinds get vectorized,
+            # photo illustrations stay raster. Vectorize failures don't
+            # abort assemble — the element falls back to raster in SVG.
+            gen = await maybe_vectorize_element(gen, enabled=body.vectorize)
             generated.append(gen)
     except Exception as exc:
         log.exception(
@@ -1490,6 +1550,7 @@ async def compose_assemble(
         ) from exc
 
     # Register the assembled PSD as an export Asset.
+    total_vector_cost = sum(g.vector_cost_usd for g in generated)
     export_asset = save_export(
         session,
         workspace,
@@ -1506,9 +1567,53 @@ async def compose_assemble(
             "height_px": result.height_px,
             "elements": [e.model_dump() for e in persisted_elements],
             "total_generation_cost_usd": result.total_generation_cost_usd,
+            "vector_cost_usd": total_vector_cost,
         },
         audit_event="export.psd.composable.created",
     )
+
+    # Assemble + save the composable SVG sibling (slice 10c). The SVG is
+    # the master vector composite: vector-traced elements as inline <g>
+    # groups, photo elements embedded as data-URI <image>. This is what
+    # downstream CDR conversion + Illustrator hand-off consume.
+    svg_asset = None
+    svg_result = None
+    try:
+        svg_out_path = (
+            workspace_root(workspace.slug)
+            / "exports"
+            / derive_composable_svg_filename(source.id or 0)
+        )
+        svg_result = assemble_composable_svg(
+            elements=generated,
+            trim_mm=(trim_w, trim_h),
+            bleed_mm=bleed,
+            out_path=svg_out_path,
+        )
+        svg_asset = save_export(
+            session,
+            workspace,
+            source_asset_id=source.id or 0,
+            out_path=svg_result.path,
+            mime_type="image/svg+xml",
+            payload_extra={
+                "tier": "Composable",
+                "of_psd_asset_id": export_asset.id,
+                "element_count": svg_result.element_count,
+                "vector_count": svg_result.vector_count,
+                "raster_count": svg_result.raster_count,
+                "width_mm": svg_result.width_mm,
+                "height_mm": svg_result.height_mm,
+                "vector_cost_usd": total_vector_cost,
+            },
+            audit_event="export.svg.composable.created",
+        )
+    except Exception as exc:
+        log.warning(
+            "composable_svg_failed",
+            workspace=workspace.slug,
+            error=str(exc),
+        )
 
     log.info(
         "composable_psd_exported",
@@ -1517,6 +1622,8 @@ async def compose_assemble(
         export_asset_id=export_asset.id,
         elements=result.element_count,
         cost_usd=result.total_generation_cost_usd,
+        vector_cost_usd=total_vector_cost,
+        svg_asset_id=svg_asset.id if svg_asset else None,
     )
     return ComposeAssembleResponse(
         asset=_asset_to_out(export_asset, workspace),
@@ -1529,6 +1636,15 @@ async def compose_assemble(
         color_space=body.color_space,
         width_px=result.width_px,
         height_px=result.height_px,
+        svg_asset_id=(svg_asset.id if svg_asset else None),
+        svg_url=(
+            f"/api/packaging/workspaces/{workspace.slug}/assets/{svg_asset.id}/file"
+            if svg_asset
+            else None
+        ),
+        svg_vector_count=(svg_result.vector_count if svg_result else 0),
+        svg_raster_count=(svg_result.raster_count if svg_result else 0),
+        vector_cost_usd=total_vector_cost,
     )
 
 
@@ -1624,6 +1740,7 @@ def _workspace_to_out(ws: Workspace) -> WorkspaceOut:
         product_type=ws.product_type,
         description=ws.description,
         specs=ws.specs,
+        design_mode=ws.design_mode,
         created_at=ws.created_at or datetime.now(UTC),
         updated_at=ws.updated_at or datetime.now(UTC),
         folder_path=str(workspace_root(ws.slug)),

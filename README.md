@@ -59,7 +59,7 @@ Open <http://localhost:2002> → **+ New workspace** → write a brief →
 | Frontend    | Next.js 14 App Router · Tailwind v3 · TypeScript  |
 | AI gen      | OpenAI **gpt-image-2** (SSE partial-image stream) |
 | Vision      | GPT-4o-mini (element discovery for composable PSD)|
-| OCR         | Tesseract (local) for Tier A+OCR text overlays    |
+| OCR         | Tesseract (local) — runs inside Make print-ready  |
 | Vector      | Vectorizer.AI (primary) · Inkscape Potrace (free) |
 | PSD writer  | psd-tools 1.17 + Pillow                           |
 | CDR writer  | CloudConvert · UniConvertor 2 (sK1, local)        |
@@ -100,22 +100,40 @@ Backend port: **8002** · Frontend port: **2002**.
   button on every variant tile and gallery card, edit-mode banner +
   read-only "Original brief" caption, 16-ref cap enforced client-side
 
-### Slice 4 — PSD export (Tier A flat + Tier A+OCR + Composable)
-- `app/services/export_psd.py`: PNG → CMYK (Pillow baseline) → PSD via
-  `psd-tools`, 300 DPI baked into the PSD Resolution Info image resource
-- `POST /workspaces/{slug}/exports/psd` — body
-  `{source_asset_id, tier, color_space: CMYK|RGB, dpi}`
-- `Asset(kind="export")` + `export.psd.tier_<x>.created` audit per tier
-- **Tier A (flat)** — single CMYK layer at 300 DPI. Always available.
-- **Tier A+OCR (editable text)** — flat base + one Tesseract-OCR'd layer
-  per detected text region (layer name encodes the text + position) + a
-  sidecar `<filename>.ocr.json` listing every region with bbox +
-  confidence. Requires `FORME_TIER_C_ENABLED=true` and Tesseract on PATH.
-- **Composable** — for fully multi-layered editable output: every
-  visual element is regenerated on a transparent canvas and assembled
-  by name into a layered PSD. See the Composable section below.
-- UI: **PSD ▾** split-button — Tier A on the main click, dropdown for
-  A+OCR + Composable. Greys out unavailable tiers with hint copy.
+### Slice 10 — Unified Make print-ready pipeline
+- **One headline action per variant: "Make print-ready"**. Opens a
+  dialog that walks the user through: Analyse → Review → Assemble →
+  Export cascade. There are no separate tier menus.
+- **Analyse** (`app/services/analyze.py`) runs Vision (GPT-4o-mini) for
+  graphic elements and Tesseract OCR for text in one pass, then merges
+  + sorts top-to-bottom into a unified element manifest.
+- **Review** lets the designer edit prompts on graphic elements, edit
+  text content on OCR-discovered text rows (with low-confidence chips
+  on garbled OCR), reposition, add or remove elements.
+- **Assemble** (`app/services/compose.py`):
+  - Each graphic element → fresh gpt-image-2 render with
+    `background="transparent"`
+  - Each text element → Pillow renders the confirmed string in a clean
+    font; layer name carries a `[type:"<text>"]` hint so a future
+    Photoshop script can convert pixel → type
+  - Line-art elements (logos, wordmarks, ornaments) auto-vectorize via
+    Vectorizer.AI; photo illustrations stay raster
+  - Layered CMYK PSD assembled at 300 DPI with bleed
+- **Export cascade** — the same per-element generations also feed a
+  composable SVG (each vectorized element as `<g>` + each raster as
+  `<image>`), the PDF/X-4, and CDR (via the SVG). One run, every
+  format.
+- Audit: `export.psd.composable.created` + `export.svg.composable.created`
+  capture the element count, vector / raster split, and total cost.
+
+### Workspace `design_mode` toggle (slice 10d / 10e)
+Two entry points for the same pipeline:
+- **OFF (default) — "I have the design"**. Upload a finished label,
+  the studio runs Make print-ready straight away.
+- **ON — "I have the bottle"**. Upload a plain product photo +
+  reference + brief. Generate label variants shown on the product;
+  iterate; hit **Approve & flatten** to drop the design into a clean
+  rectangular sticker that feeds the same Make-print-ready flow.
 
 ### Slice 5 — Print PDF/X-4
 - **`app/services/export_pdf.py`** — ReportLab-based PDF/X-4 generator:
@@ -138,25 +156,6 @@ Backend port: **8002** · Frontend port: **2002**.
 - `Asset(kind="export", mime="image/svg+xml")` + `export.vector.created` audit row carrying the chosen provider + mode.
 - UI: clay-coloured **SVG** button (icon: `Shapes`) on every variant tile and gallery card. On vector-export failure, the Exports section renders the upstream error plus a one-click *"Try with Vectorizer.AI"* / *"Try with Inkscape Potrace"* affordance — exactly one alternate, never auto-invoked. Exports list distinguishes SVG by colour + icon.
 - Settings: Provider routing card now exposes Vectorizer.AI **mode** (`production` / `test` / `preview`) and a shared vector-timeout field; per-stage availability hints flag missing creds (e.g. "no key") and missing tools (e.g. "not installed").
-
-### Composable PSD — multi-layered editable export
-- **`app/services/vision.py`** — GPT-4o-mini analyses the approved
-  whole-sticker generation and returns a JSON manifest of detected
-  visual elements (logos, wordmarks, illustrations, ornaments) with
-  positions in mm + a suggested prompt per element.
-- **`app/services/compose.py`** — fans out one gpt-image-2 call per
-  element with `background="transparent"`, then assembles all results
-  by name + position into a multi-layered CMYK PSD. Every element is
-  its own editable Photoshop layer; designers can swap, move, restyle
-  individually without re-rendering the whole sticker.
-- `POST /workspaces/{slug}/compose/discover` returns the manifest;
-  `POST /workspaces/{slug}/exports/psd-composable` runs the
-  per-element generation + assembly.
-- UI: **Composable** entry in the PSD ▾ menu opens a review dialog —
-  user edits prompts, removes/adds elements, picks quality, hits
-  *Generate + assemble*. Each generated element lands as its own
-  `Asset(kind="generation")`; the assembled PSD lands as
-  `Asset(kind="export")` with `export.psd.composable.created` audit.
 
 ### Slice 7 — CDR export (CorelDRAW)
 - **`app/services/export_cdr.py`** — dispatcher mirroring slice 6:
@@ -184,11 +183,11 @@ Backend port: **8002** · Frontend port: **2002**.
 | Stage          | Paid primary       | Free / alt                       | Status                          |
 | -------------- | ------------------ | -------------------------------- | ------------------------------- |
 | Image gen/edit | gpt-image-2 (only) | —                                | live ✓                          |
-| Vision (compose) | GPT-4o-mini      | —                                | live ✓ (Composable PSD)         |
-| OCR            | Tesseract (local)  | —                                | live ✓ — toggle on              |
+| Vision         | GPT-4o-mini        | —                                | live ✓ (analyze pass)           |
+| OCR            | Tesseract (local)  | —                                | live ✓ — auto when binary found |
 | Print PDF/X-4  | ReportLab + ICC    | —                                | live ✓                          |
-| Vector         | Vectorizer.AI      | Inkscape Potrace                 | live ✓                          |
-| PSD            | psd-tools (local)  | —                                | Tier A · A+OCR · Composable ✓   |
+| Vector         | Vectorizer.AI      | Inkscape Potrace                 | live ✓ (per-element auto-vec)   |
+| PSD            | psd-tools (local)  | —                                | Composable (multi-layer)        |
 | CDR            | CloudConvert       | UniConvertor (sK1, local)        | live ✓                          |
 
 ---
@@ -206,7 +205,7 @@ forme-studio/
 │   │   ├── deps.py
 │   │   ├── models/          ← Workspace · AuditEvent · Asset
 │   │   ├── services/        ← filesystem · audit · pricing · ocr
-│   │   │                       openai_image · export_psd · export_pdf
+│   │   │                       openai_image · analyze · export_pdf
 │   │   │                       export_cdr · vector · vision · compose
 │   │   │                       image_normalize · assets
 │   │   ├── modules/
@@ -264,5 +263,6 @@ Pilot is **production-ready** against real gpt-image-2 calls.
 - ✅ **Slice 5** — Print PDF/X-4 with CMYK ICC + bleed/trim/registration marks
 - ✅ **Slice 6** — Vector exports (Vectorizer.AI primary + Inkscape Potrace fallback, non-auto fallback)
 - ✅ **Slice 7** — CDR exports (CloudConvert paid + UniConvertor local, non-auto fallback)
-- ✅ **Slice 8** — Tier A+OCR PSD (Tesseract text overlays) + Composable PSD (multi-layered editable export)
+- ✅ **Slice 8** — Composable PSD (multi-layered editable export, per-element regeneration)
+- ✅ **Slice 10** — Unified Make-print-ready pipeline (Vision + OCR merge, Pillow text rendering, selective auto-vectorization, design_mode toggle, single CTA)
 - **Module #2** — Apparel (tee, hoodie, packaging-adjacent print)

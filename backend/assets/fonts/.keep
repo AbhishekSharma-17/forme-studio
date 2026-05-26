@@ -1,0 +1,11 @@
+Drop a TrueType font here (e.g. DejaVuSans.ttf) to override the text-render
+font chain in services/compose.py:_FONT_CANDIDATES.
+
+Order of fallback:
+  1. <repo>/backend/assets/fonts/DejaVuSans.ttf  ← drop the .ttf here
+  2. /System/Library/Fonts/Helvetica.ttc           ← macOS default
+  3. /usr/share/fonts/truetype/dejavu/...          ← Debian/Ubuntu default
+  4. PIL.ImageFont.load_default()                  ← last-resort bitmap
+
+This directory is intentionally checked in empty so the build never depends
+on a font binary; bundling one is opt-in.

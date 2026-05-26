@@ -106,6 +106,99 @@ def test_get_workspace_round_trip(client: TestClient) -> None:
     assert fetched["id"] == created["id"]
     assert fetched["product_type"] == "cream_jar_label"
     assert fetched["specs"]["trim_mm"] == {"w": 60.0, "h": 60.0}
+    # Slice 10d — design_mode defaults to False.
+    assert fetched["design_mode"] is False
+
+
+def test_create_workspace_with_design_mode_true(
+    client: TestClient, isolated_paths: Path
+) -> None:
+    """Slice 10d: design_mode=true round-trips through create + get."""
+    res = client.post(
+        "/api/packaging/workspaces",
+        json={
+            "name": "Brainstorm Test",
+            "product_type": "lotion_bottle_label",
+            "design_mode": True,
+        },
+    )
+    assert res.status_code == 201, res.text
+    ws = res.json()
+    assert ws["design_mode"] is True
+
+    # Audit row carries the flag.
+    audit_path = isolated_paths / "workspaces" / ws["slug"] / "audit.log.jsonl"
+    events = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    created = next(e for e in events if e["event"] == "workspace.created")
+    assert created["payload"]["design_mode"] is True
+
+
+def test_patch_workspace_flips_design_mode(
+    client: TestClient, isolated_paths: Path
+) -> None:
+    """The PATCH route flips design_mode and writes a workspace.updated audit."""
+    ws = _create(client, name="Patch Target")
+    assert ws["design_mode"] is False
+
+    res = client.patch(
+        f"/api/packaging/workspaces/{ws['slug']}",
+        json={"design_mode": True},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["design_mode"] is True
+
+    # Audit captures the diff with from/to values.
+    audit_path = isolated_paths / "workspaces" / ws["slug"] / "audit.log.jsonl"
+    events = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    updates = [e for e in events if e["event"] == "workspace.updated"]
+    assert len(updates) == 1
+    assert updates[0]["payload"]["changed"] == {
+        "design_mode": {"from": False, "to": True},
+    }
+
+
+def test_patch_workspace_name_and_description(
+    client: TestClient, isolated_paths: Path
+) -> None:
+    """Multiple fields can be updated at once; specs stay frozen."""
+    ws = _create(client, name="Original Name", description="original desc")
+    original_specs = ws["specs"]
+
+    res = client.patch(
+        f"/api/packaging/workspaces/{ws['slug']}",
+        json={"name": "New Name", "description": "new desc"},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["name"] == "New Name"
+    assert body["description"] == "new desc"
+    # Frozen specs unaffected.
+    assert body["specs"] == original_specs
+
+
+def test_patch_workspace_no_op_returns_unchanged(client: TestClient) -> None:
+    """An empty PATCH (no changes) returns the workspace without auditing."""
+    ws = _create(client, name="No-Op")
+    res = client.patch(
+        f"/api/packaging/workspaces/{ws['slug']}",
+        json={"design_mode": False},  # already False
+    )
+    assert res.status_code == 200
+    assert res.json()["design_mode"] is False
+
+
+def test_patch_workspace_rejects_unknown_field(client: TestClient) -> None:
+    """Specs and other frozen fields are NOT mutable through PATCH."""
+    ws = _create(client, name="Frozen Test")
+    # `product_type` is intentionally not in WorkspaceUpdate; pydantic
+    # quietly ignores unknown fields by default. Verify the field stays.
+    res = client.patch(
+        f"/api/packaging/workspaces/{ws['slug']}",
+        json={"product_type": "cream_jar_label"},
+    )
+    assert res.status_code == 200
+    assert res.json()["product_type"] == ws["product_type"]
 
 
 def test_presets_endpoint_lists_all_five(client: TestClient) -> None:

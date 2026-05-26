@@ -35,9 +35,7 @@ def test_health_returns_ok_with_capabilities(client: TestClient) -> None:
         "cdr_fallback": "uniconvertor",
     }
 
-    # Tier availability — A always true; A+OCR depends on FORME_TIER_C_ENABLED
-    # (off in CI conftest) so it's False.
-    assert body["tiers"] == {
-        "tier_a": True,
-        "tier_a_ocr": False,
-    }
+    # Slice 10g — the legacy `tiers` block was removed. The Composable
+    # pipeline is the only PSD producer; OCR availability is signalled
+    # via the capabilities.tesseract bool above instead.
+    assert "tiers" not in body

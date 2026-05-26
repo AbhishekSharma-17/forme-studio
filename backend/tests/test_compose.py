@@ -149,7 +149,8 @@ _HAPPY_MANIFEST = """
       "prompt": "IMARA wordmark in gold serif. Transparent background. Isolated. No other elements.",
       "position_mm": [16, 8, 43, 18],
       "size_px": "1024x1024",
-      "kind": "wordmark"
+      "kind": "wordmark",
+      "vectorizable": true
     },
     {
       "name": "sandalwood_botanical",
@@ -157,15 +158,8 @@ _HAPPY_MANIFEST = """
       "prompt": "Sandalwood leaves intertwined with saffron strands in gold line-art. Transparent background. Isolated. No other elements.",
       "position_mm": [12, 35, 51, 51],
       "size_px": "1024x1024",
-      "kind": "graphic"
-    },
-    {
-      "name": "ingredients_block",
-      "label": "Ingredients body copy",
-      "prompt": "(handled by OCR)",
-      "position_mm": [4, 100, 67, 20],
-      "size_px": "1024x1024",
-      "kind": "body_copy"
+      "kind": "graphic",
+      "vectorizable": false
     }
   ]
 }
@@ -178,7 +172,12 @@ def test_compose_discover_returns_manifest_with_trim_mm(
     fake_openai: StubOpenAIClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Happy path: stub vision → endpoint returns the parsed manifest."""
+    """Happy path: stub vision → unified analyzer returns the manifest.
+
+    OCR is NOT available in the test (Tesseract isn't on PATH in CI),
+    so the unified manifest contains only the graphic elements from
+    vision; ``ocr_available`` is False.
+    """
     _patch_vision(monkeypatch, fake_openai, _HAPPY_MANIFEST)
 
     ws = _create_workspace(client)
@@ -193,13 +192,22 @@ def test_compose_discover_returns_manifest_with_trim_mm(
     assert body["source_asset_id"] == src_id
     # trim_mm comes from the lotion preset (70 × 100)
     assert body["trim_mm"] == {"w": 70.0, "h": 100.0}
-    assert len(body["elements"]) == 3
+    assert len(body["elements"]) == 2
     names = {e["name"] for e in body["elements"]}
-    assert names == {"imara_wordmark", "sandalwood_botanical", "ingredients_block"}
-    # body_copy elements DO appear in the manifest so the UI knows about
-    # them (they're skipped during assembly, not discovery).
-    body_copies = [e for e in body["elements"] if e["kind"] == "body_copy"]
-    assert len(body_copies) == 1
+    assert names == {"imara_wordmark", "sandalwood_botanical"}
+    # Slice 10a: vectorizable hint flows through.
+    by_name = {e["name"]: e for e in body["elements"]}
+    assert by_name["imara_wordmark"]["vectorizable"] is True
+    assert by_name["sandalwood_botanical"]["vectorizable"] is False
+    # text + confidence are None for vision-discovered graphics
+    for e in body["elements"]:
+        assert e["text"] is None
+        assert e["confidence"] is None
+        assert e["kind"] != "text"
+    # `ocr_available` mirrors the host environment — True when Tesseract
+    # is on PATH (dev machine), False in clean CI. Either is fine here;
+    # we just assert the key is present and boolean.
+    assert isinstance(body["ocr_available"], bool)
 
 
 def test_compose_discover_rejects_invalid_json_from_vision(
@@ -366,7 +374,10 @@ def test_compose_assemble_rejects_all_body_copy_manifest(
         json=payload,
     )
     assert res.status_code == 422
-    assert "body_copy" in res.json()["detail"]
+    # The error message guides the user to add at least one graphic OR text
+    # element. The exact text changed in slice 10b — body_copy elements get
+    # routed to OCR which produces kind="text" entries instead.
+    assert "No renderable elements" in res.json()["detail"]
 
 
 def test_compose_assemble_per_element_failure_surfaces_502(
@@ -424,3 +435,599 @@ def test_compose_assemble_audits_export_event(
     assert payload["layer_count"] == 3
     assert payload["dpi"] == 300
     assert payload["color_space"] == "CMYK"
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  TEXT ELEMENTS (slice 10b)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_compose_assemble_text_element_renders_via_pillow_not_openai(
+    client: TestClient,
+    isolated_paths: Path,
+    fake_openai: StubOpenAIClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text elements must NOT hit gpt-image-2 — Pillow renders them.
+
+    If the assemble endpoint mistakenly routes a text element to the
+    image-gen path, this fails: the stub openai client tracks every call,
+    and we assert it was only called for the graphic element.
+    """
+    call_log: list[str] = []
+
+    async def _gen(**kwargs: Any) -> Any:
+        call_log.append(str(kwargs.get("prompt", "")))
+
+        class _D:
+            def __init__(self, b64: str) -> None:
+                self.b64_json = b64
+
+        class _U:
+            def model_dump(self) -> dict[str, Any]:
+                return {"input_tokens": 100, "output_tokens": 100}
+
+        class _R:
+            def __init__(self) -> None:
+                self.data = [_D(_transparent_png())]
+                self.usage = _U()
+
+        return _R()
+
+    fake_openai.images.generate = _gen  # type: ignore[method-assign]
+
+    ws = _create_workspace(client)
+    src_id = _generate(client, ws["slug"])
+
+    payload = {
+        "source_asset_id": src_id,
+        "quality": "medium",
+        "elements": [
+            {
+                "name": "imara_wordmark",
+                "label": "IMARA wordmark",
+                "prompt": "IMARA wordmark in gold. Transparent. Isolated.",
+                "position_mm": [16, 8, 43, 18],
+                "size_px": "1024x1024",
+                "kind": "wordmark",
+            },
+            {
+                "name": "text_01",
+                "label": "Headline",
+                "prompt": "IMARA SANDALWOOD",
+                "position_mm": [4, 60, 60, 12],
+                "size_px": "1536x1024",
+                "kind": "text",
+                "text": "IMARA SANDALWOOD",
+                "confidence": 96.5,
+            },
+        ],
+    }
+    # Clear any leftover prompts from the initial _generate() call —
+    # we only care about the assemble-stage calls.
+    call_log.clear()
+
+    res = client.post(
+        f"/api/packaging/workspaces/{ws['slug']}/exports/psd-composable",
+        json=payload,
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    # Both elements get persisted + layered in.
+    assert body["element_count"] == 2
+    assert body["layer_count"] == 3  # base + 2
+
+    # gpt-image-2 was only called for the graphic, not the text.
+    image_gen_prompts = [p for p in call_log if "Transparent" in p or "wordmark" in p]
+    assert len(image_gen_prompts) == 1
+    assert all("SANDALWOOD" not in p for p in image_gen_prompts)
+
+
+def test_compose_assemble_text_element_missing_content_returns_422(
+    client: TestClient,
+    isolated_paths: Path,
+    fake_openai: StubOpenAIClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a kind='text' element comes through without `text`, hard-fail."""
+    _patch_image_gen(monkeypatch, fake_openai)
+
+    ws = _create_workspace(client)
+    src_id = _generate(client, ws["slug"])
+
+    payload = {
+        "source_asset_id": src_id,
+        "elements": [
+            {
+                "name": "ghost_text",
+                "label": "Empty text",
+                "prompt": "irrelevant",
+                "position_mm": [4, 60, 60, 12],
+                "size_px": "1024x1024",
+                "kind": "text",
+                # text is intentionally missing
+            },
+        ],
+    }
+    res = client.post(
+        f"/api/packaging/workspaces/{ws['slug']}/exports/psd-composable",
+        json=payload,
+    )
+    assert res.status_code == 422
+    assert "ghost_text" in res.json()["detail"]
+
+
+def test_compose_text_layer_name_carries_type_hint() -> None:
+    """`_layer_name_for` encodes the text into the PSD layer name.
+
+    Designers reading the layer panel see the actual content, and a
+    future Photoshop script can parse the [type:"..."] suffix to
+    auto-convert into a real type layer.
+    """
+    from app.services.compose import _layer_name_for
+    from app.services.vision import ElementSpec
+
+    spec = ElementSpec(
+        name="text_01",
+        label="Headline",
+        prompt="IMARA SANDALWOOD",
+        position_mm=(0, 0, 60, 12),
+        size_px="1536x1024",
+        kind="text",
+        text="IMARA SANDALWOOD",
+    )
+    name = _layer_name_for(spec)
+    assert name.startswith("text_01")
+    assert '[type:"IMARA SANDALWOOD"]' in name
+
+
+def test_compose_text_layer_name_truncates_long_text() -> None:
+    """Long text is truncated at 60 chars with ellipsis in the layer name."""
+    from app.services.compose import _layer_name_for
+    from app.services.vision import ElementSpec
+
+    long_text = "x" * 200
+    spec = ElementSpec(
+        name="text_blob",
+        label="Body",
+        prompt=long_text,
+        position_mm=(0, 0, 60, 30),
+        size_px="1024x1024",
+        kind="text",
+        text=long_text,
+    )
+    name = _layer_name_for(spec)
+    assert "…" in name
+    # Total length is bounded — name + space + [type:"...60..."]
+    assert len(name) < 100
+
+
+def test_compose_text_renders_visible_pixels() -> None:
+    """The Pillow-rendered text element must produce non-empty alpha."""
+    import io as _io
+
+    from PIL import Image as _Image
+
+    from app.services.compose import _render_text_element
+    from app.services.vision import ElementSpec
+
+    spec = ElementSpec(
+        name="text_01",
+        label="Headline",
+        prompt="IMARA",
+        position_mm=(0, 0, 40, 12),
+        size_px="1024x1024",
+        kind="text",
+        text="IMARA",
+    )
+    elem = _render_text_element(spec)
+    assert elem.cost_usd == 0.0
+    assert elem.width_px == 1024
+    assert elem.height_px == 1024
+    # Decode the PNG and verify some pixels are opaque (the text glyphs).
+    img = _Image.open(_io.BytesIO(elem.png_bytes)).convert("RGBA")
+    alpha_bytes = img.getchannel("A").tobytes()
+    opaque_count = sum(1 for a in alpha_bytes if a > 0)
+    assert opaque_count > 100, "rendered text has no visible pixels"
+
+
+def test_compose_layer_name_for_graphic_is_plain() -> None:
+    """Non-text elements get just the slug as the layer name."""
+    from app.services.compose import _layer_name_for
+    from app.services.vision import ElementSpec
+
+    spec = ElementSpec(
+        name="imara_wordmark",
+        label="IMARA wordmark",
+        prompt="...",
+        position_mm=(0, 0, 40, 12),
+        size_px="1024x1024",
+        kind="wordmark",
+    )
+    assert _layer_name_for(spec) == "imara_wordmark"
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  SELECTIVE AUTO-VECTORIZATION (slice 10c)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_should_vectorize_picks_line_art_kinds() -> None:
+    """wordmark / ornament / seal get auto-vectorized by default.
+
+    text is NEVER vectorized (rendered crisp by Pillow already).
+    photo-realistic graphic stays raster unless vectorizable=True.
+    """
+    from app.services.compose import _should_vectorize
+    from app.services.vision import ElementSpec
+
+    def _spec(kind: str, vectorizable: bool = False) -> ElementSpec:
+        return ElementSpec(
+            name="x",
+            label="x",
+            prompt="x",
+            position_mm=(0, 0, 1, 1),
+            size_px="1024x1024",
+            kind=kind,  # type: ignore[arg-type]
+            vectorizable=vectorizable,
+        )
+
+    assert _should_vectorize(_spec("wordmark")) is True
+    assert _should_vectorize(_spec("ornament")) is True
+    assert _should_vectorize(_spec("seal")) is True
+    assert _should_vectorize(_spec("text", vectorizable=True)) is False  # never
+    assert _should_vectorize(_spec("graphic")) is False                  # default off
+    assert _should_vectorize(_spec("graphic", vectorizable=True)) is True  # hint
+    assert _should_vectorize(_spec("headline")) is False
+
+
+async def test_maybe_vectorize_attaches_svg_for_line_art(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When enabled + a vectorizable element, the SVG is attached."""
+    from app.services import compose as compose_module
+    from app.services.compose import GeneratedElement, maybe_vectorize_element
+    from app.services.vector import VectorResult
+    from app.services.vision import ElementSpec
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_vectorize(
+        png_bytes: bytes, *, provider: str | None = None
+    ) -> VectorResult:
+        captured["bytes"] = len(png_bytes)
+        captured["provider"] = provider
+        return VectorResult(
+            svg_bytes=b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><path d="M0,0 L10,10"/></svg>',
+            provider="vectorizer_ai",
+            mode="production",
+            size_bytes=120,
+        )
+
+    monkeypatch.setattr(compose_module, "run_vectorize", _fake_vectorize)
+
+    elem = GeneratedElement(
+        spec=ElementSpec(
+            name="imara_wordmark",
+            label="IMARA",
+            prompt="IMARA wordmark",
+            position_mm=(0, 0, 40, 12),
+            size_px="1024x1024",
+            kind="wordmark",
+        ),
+        png_bytes=_transparent_png().encode() if False else b"\x89PNG\r\n",
+        width_px=512,
+        height_px=512,
+        cost_usd=0.05,
+    )
+
+    result = await maybe_vectorize_element(elem, enabled=True)
+    assert result.svg_bytes is not None
+    assert b"<path" in result.svg_bytes
+    # Production mode cost = $0.20
+    assert result.vector_cost_usd == 0.20
+    # The PNG and other fields are preserved.
+    assert result.cost_usd == 0.05
+
+
+async def test_maybe_vectorize_skips_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`enabled=False` short-circuits — vectorizer must not be called."""
+    from app.services import compose as compose_module
+    from app.services.compose import GeneratedElement, maybe_vectorize_element
+    from app.services.vision import ElementSpec
+
+    async def _no_call(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("vectorize must not be called when enabled=False")
+
+    monkeypatch.setattr(compose_module, "run_vectorize", _no_call)
+
+    elem = GeneratedElement(
+        spec=ElementSpec(
+            name="x",
+            label="x",
+            prompt="x",
+            position_mm=(0, 0, 1, 1),
+            size_px="1024x1024",
+            kind="wordmark",
+        ),
+        png_bytes=b"\x89PNG",
+        width_px=10,
+        height_px=10,
+        cost_usd=0.0,
+    )
+    result = await maybe_vectorize_element(elem, enabled=False)
+    assert result.svg_bytes is None
+
+
+async def test_maybe_vectorize_skips_text_elements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Text elements never get auto-vectorized (already crisp via Pillow)."""
+    from app.services import compose as compose_module
+    from app.services.compose import GeneratedElement, maybe_vectorize_element
+    from app.services.vision import ElementSpec
+
+    async def _no_call(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("text elements must not vectorize")
+
+    monkeypatch.setattr(compose_module, "run_vectorize", _no_call)
+
+    elem = GeneratedElement(
+        spec=ElementSpec(
+            name="text_01",
+            label="Headline",
+            prompt="IMARA",
+            position_mm=(0, 0, 40, 12),
+            size_px="1024x1024",
+            kind="text",
+            text="IMARA",
+        ),
+        png_bytes=b"\x89PNG",
+        width_px=1024,
+        height_px=1024,
+        cost_usd=0.0,
+    )
+    result = await maybe_vectorize_element(elem, enabled=True)
+    assert result.svg_bytes is None
+
+
+async def test_maybe_vectorize_failure_falls_back_to_raster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If vectorize raises, the element is returned unchanged (raster only).
+
+    A failed vector pass MUST NOT abort the whole assemble — the PSD
+    still ships; the SVG just embeds the raster <image> for this layer.
+    """
+    from app.services import compose as compose_module
+    from app.services.compose import GeneratedElement, maybe_vectorize_element
+    from app.services.vision import ElementSpec
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("vectorizer 503")
+
+    monkeypatch.setattr(compose_module, "run_vectorize", _boom)
+
+    elem = GeneratedElement(
+        spec=ElementSpec(
+            name="wordmark",
+            label="W",
+            prompt="W",
+            position_mm=(0, 0, 1, 1),
+            size_px="1024x1024",
+            kind="wordmark",
+        ),
+        png_bytes=b"\x89PNG",
+        width_px=10,
+        height_px=10,
+        cost_usd=0.0,
+    )
+    result = await maybe_vectorize_element(elem, enabled=True)
+    assert result.svg_bytes is None
+    assert result.vector_cost_usd == 0.0
+
+
+def test_assemble_composable_svg_mixes_vector_and_raster(
+    tmp_path: Path,
+) -> None:
+    """SVG composite carries vectorized elements as <g>, others as <image>."""
+    from app.services.compose import GeneratedElement, assemble_composable_svg
+    from app.services.vision import ElementSpec
+
+    # Two elements: one with svg_bytes (line-art), one without (photo).
+    vec_elem = GeneratedElement(
+        spec=ElementSpec(
+            name="imara_wordmark",
+            label="IMARA",
+            prompt="...",
+            position_mm=(10, 5, 30, 15),
+            size_px="1024x1024",
+            kind="wordmark",
+        ),
+        png_bytes=b"PNG-vec",
+        width_px=512,
+        height_px=512,
+        cost_usd=0.0,
+        svg_bytes=(
+            b'<?xml version="1.0"?>'
+            b'<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">'
+            b'<path d="M0,0 L10,10" stroke="black"/></svg>'
+        ),
+    )
+    img_b64 = _transparent_png(64, 64)
+    raster_elem = GeneratedElement(
+        spec=ElementSpec(
+            name="sandalwood",
+            label="Sandalwood",
+            prompt="...",
+            position_mm=(8, 30, 50, 40),
+            size_px="1024x1024",
+            kind="graphic",
+            vectorizable=False,
+        ),
+        png_bytes=base64.b64decode(img_b64),
+        width_px=64,
+        height_px=64,
+        cost_usd=0.0,
+    )
+
+    out = tmp_path / "composite.svg"
+    result = assemble_composable_svg(
+        elements=[vec_elem, raster_elem],
+        trim_mm=(70.0, 100.0),
+        bleed_mm=3.0,
+        out_path=out,
+    )
+    assert result.vector_count == 1
+    assert result.raster_count == 1
+    assert result.width_mm == 76.0   # 70 + 2 × 3
+    assert result.height_mm == 106.0  # 100 + 2 × 3
+    assert out.is_file()
+
+    body = out.read_text()
+    # Vector path inlined inside a <g> with our transform.
+    assert '<g id="imara_wordmark"' in body
+    assert "translate(13.0000,8.0000)" in body  # trim x=10 + bleed 3
+    assert 'd="M0,0 L10,10"' in body
+    # Raster fallback for the photo element.
+    assert '<image id="sandalwood"' in body
+    assert "data:image/png;base64," in body
+    # Top-level SVG header carries mm dimensions for press.
+    assert 'width="76.0mm"' in body or 'width="76mm"' in body
+    assert 'viewBox="0 0 76.0 106.0"' in body
+
+
+def test_compose_assemble_produces_psd_and_svg_siblings(
+    client: TestClient,
+    isolated_paths: Path,
+    fake_openai: StubOpenAIClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 10c happy path: assemble produces BOTH a PSD AND a sibling SVG.
+
+    SVG export is best-effort and shouldn't fail the PSD if vectorization
+    glitches — but in the happy path we expect both to land on disk.
+    """
+    import json as _json
+
+    _patch_image_gen(monkeypatch, fake_openai)
+
+    # Stub vectorize to return a tiny valid SVG so the wordmark element
+    # ends up in the SVG composite as a <g>, while sandalwood (raster)
+    # ends up as <image>.
+    from app.services import compose as compose_module
+    from app.services.vector import VectorResult
+
+    async def _fake_vectorize(
+        png_bytes: bytes, *, provider: str | None = None
+    ) -> VectorResult:
+        return VectorResult(
+            svg_bytes=(
+                b'<?xml version="1.0"?>'
+                b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+                b'<path d="M0,0 L1,1"/></svg>'
+            ),
+            provider="vectorizer_ai",
+            mode="test",
+            size_bytes=120,
+        )
+
+    monkeypatch.setattr(compose_module, "run_vectorize", _fake_vectorize)
+
+    ws = _create_workspace(client)
+    src_id = _generate(client, ws["slug"])
+
+    payload = {
+        "source_asset_id": src_id,
+        "quality": "medium",
+        "vectorize": True,
+        "elements": [
+            {
+                "name": "imara_wordmark",
+                "label": "IMARA wordmark",
+                "prompt": "IMARA wordmark. Transparent. Isolated.",
+                "position_mm": [16, 8, 43, 18],
+                "size_px": "1024x1024",
+                "kind": "wordmark",  # vectorize → True
+            },
+            {
+                "name": "sandalwood",
+                "label": "Botanical",
+                "prompt": "Sandalwood leaves. Transparent. Isolated.",
+                "position_mm": [12, 35, 51, 51],
+                "size_px": "1024x1024",
+                "kind": "graphic",  # default → no vector
+            },
+        ],
+    }
+    res = client.post(
+        f"/api/packaging/workspaces/{ws['slug']}/exports/psd-composable",
+        json=payload,
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+
+    # PSD lives where it always did.
+    assert body["element_count"] == 2
+    assert body["layer_count"] == 3
+    # SVG sibling — both vector + raster present.
+    assert body["svg_asset_id"] is not None
+    assert body["svg_url"] is not None
+    assert body["svg_vector_count"] == 1
+    assert body["svg_raster_count"] == 1
+    # Vectorizer.AI in test mode → $0.02 per element vectorized = $0.02 total.
+    assert body["vector_cost_usd"] == pytest.approx(0.02, abs=0.001)
+
+    # The audit JSONL has both events.
+    audit_path = isolated_paths / "workspaces" / ws["slug"] / "audit.log.jsonl"
+    events = [_json.loads(line)["event"] for line in audit_path.read_text().splitlines()]
+    assert "export.psd.composable.created" in events
+    assert "export.svg.composable.created" in events
+
+
+def test_compose_assemble_skips_svg_step_when_vectorize_off(
+    client: TestClient,
+    isolated_paths: Path,
+    fake_openai: StubOpenAIClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vectorize=False keeps SVG composite as all-raster (still produced)."""
+    _patch_image_gen(monkeypatch, fake_openai)
+    # Sentinel: vectorizer must not be called.
+    from app.services import compose as compose_module
+
+    async def _no_call(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("vectorize must not be called when vectorize=False")
+
+    monkeypatch.setattr(compose_module, "run_vectorize", _no_call)
+
+    ws = _create_workspace(client)
+    src_id = _generate(client, ws["slug"])
+
+    payload = {
+        "source_asset_id": src_id,
+        "quality": "medium",
+        "vectorize": False,  # off
+        "elements": [
+            {
+                "name": "imara_wordmark",
+                "label": "IMARA wordmark",
+                "prompt": "IMARA wordmark. Transparent. Isolated.",
+                "position_mm": [16, 8, 43, 18],
+                "size_px": "1024x1024",
+                "kind": "wordmark",
+            },
+        ],
+    }
+    res = client.post(
+        f"/api/packaging/workspaces/{ws['slug']}/exports/psd-composable",
+        json=payload,
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    # SVG is still produced (all raster); vector_count=0, raster_count=1.
+    assert body["svg_vector_count"] == 0
+    assert body["svg_raster_count"] == 1
+    assert body["vector_cost_usd"] == 0.0

@@ -47,7 +47,6 @@ WRITABLE_KEYS: tuple[str, ...] = (
     "FORME_CDR_TIMEOUT_S",
     "FORME_CLOUDCONVERT_SANDBOX",
     "FORME_LOG_LEVEL",
-    "FORME_TIER_C_ENABLED",
     "FORME_TESSERACT_CMD",
     "FORME_TESSERACT_LANG",
     "FORME_PRINT_ICC_PATH",
@@ -127,9 +126,6 @@ class SettingsOut(BaseModel):
     cdr_timeout_s: float
     cloudconvert_sandbox: bool
 
-    # OCR / Tier A+OCR
-    tier_c_enabled: bool
-
     # Print PDF/X-4 ICC
     print_icc_path: str
     print_icc_present: bool
@@ -158,8 +154,7 @@ class SettingsPatch(BaseModel):
     cdr_timeout_s: float | None = Field(default=None, ge=10.0, le=600.0)
     cloudconvert_sandbox: bool | None = None
     log_level: Literal["debug", "info", "warning", "error"] | None = None
-    # OCR / Tier A+OCR
-    tier_c_enabled: bool | None = None
+    # OCR (runs inside the unified analyze pipeline)
     tesseract_cmd: str | None = None
     tesseract_lang: str | None = Field(default=None, max_length=40)
     # Print PDF/X-4
@@ -229,7 +224,6 @@ def _patch_to_env_updates(patch: SettingsPatch) -> dict[str, str]:
         "cdr_timeout_s": "FORME_CDR_TIMEOUT_S",
         "cloudconvert_sandbox": "FORME_CLOUDCONVERT_SANDBOX",
         "log_level": "FORME_LOG_LEVEL",
-        "tier_c_enabled": "FORME_TIER_C_ENABLED",
         "tesseract_cmd": "FORME_TESSERACT_CMD",
         "tesseract_lang": "FORME_TESSERACT_LANG",
         "print_icc_path": "FORME_PRINT_ICC_PATH",
@@ -298,7 +292,6 @@ async def read_settings() -> SettingsOut:
         tesseract_cmd=s.tesseract_cmd,
         tesseract_present=shutil.which(s.tesseract_cmd) is not None,
         tesseract_lang=s.tesseract_lang,
-        tier_c_enabled=s.tier_c_enabled,
         print_icc_path=s.print_icc_path,
         print_icc_present=Path(s.print_icc_path).is_file(),
         print_icc_name=s.print_icc_name,

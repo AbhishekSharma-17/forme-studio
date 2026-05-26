@@ -109,12 +109,6 @@ export default async function WorkspaceDetailPage({ params }: Props) {
         initialReferences={references}
         initialExports={exports}
         canGenerate={canGenerate}
-        tiers={
-          health?.tiers ?? {
-            tier_a: true,
-            tier_a_ocr: false,
-          }
-        }
         providers={
           health?.providers ?? {
             vectorizer_primary: "vectorizer_ai",

@@ -21,11 +21,6 @@ export interface HealthCapabilities {
   cdr_uniconvertor: boolean;
 }
 
-export interface TierAvailability {
-  tier_a: boolean;
-  tier_a_ocr: boolean;
-}
-
 export type VectorizerProvider = "vectorizer_ai" | "inkscape_potrace";
 
 export interface ProvidersSelected {
@@ -41,7 +36,6 @@ export interface Health {
   image_model: string;
   capabilities: HealthCapabilities;
   providers: ProvidersSelected;
-  tiers: TierAvailability;
 }
 
 export interface PackagingPreset {
@@ -80,6 +74,7 @@ export interface Workspace {
   product_type: string;
   description: string | null;
   specs: Record<string, unknown>;
+  design_mode: boolean;
   created_at: string;
   updated_at: string;
   folder_path: string;
@@ -90,6 +85,15 @@ export interface WorkspaceCreate {
   product_type: string;
   description?: string;
   slug?: string;
+  /** Slice 10d: brainstorm-on-product flow when true; analyze-existing
+   * (default) when false. Determines the studio's initial UX framing. */
+  design_mode?: boolean;
+}
+
+export interface WorkspaceUpdate {
+  name?: string;
+  description?: string;
+  design_mode?: boolean;
 }
 
 export interface WorkspaceDeleteRequest {
@@ -150,28 +154,6 @@ export interface ReferenceUploadResponse {
   total: number;
 }
 
-export type PsdTier = "A" | "A+OCR" | "COMPOSABLE";
-
-export interface PsdExportRequest {
-  source_asset_id: number;
-  tier?: PsdTier;
-  color_space?: "CMYK" | "RGB";
-  dpi?: number;
-}
-
-export interface PsdExportResponse {
-  asset: Asset;
-  source_asset_id: number;
-  tier: PsdTier;
-  color_space: string;
-  dpi: number;
-  width: number;
-  height: number;
-  layer_count: number;
-  sidecar_url: string | null;
-  text_layer_count: number | null;
-}
-
 export interface PdfExportRequest {
   source_asset_id: number;
   dpi?: number;
@@ -208,7 +190,7 @@ export interface VectorExportResponse {
   size_bytes: number;
 }
 
-// ──────────────────────────────────────────────────── Composable PSD (slice 8)
+// ──────────────────────────────────────────────────── Composable PSD (slice 8/10)
 
 export type ElementKind =
   | "graphic"
@@ -216,7 +198,8 @@ export type ElementKind =
   | "headline"
   | "ornament"
   | "seal"
-  | "body_copy";
+  | "body_copy"
+  | "text"; // slice 10a — OCR-discovered text region
 
 export interface ElementSpec {
   name: string;
@@ -226,6 +209,12 @@ export interface ElementSpec {
   position_mm: [number, number, number, number];
   size_px: "1024x1024" | "1024x1536" | "1536x1024";
   kind: ElementKind;
+  /** OCR'd text content (only for kind="text"). User can edit before assemble. */
+  text?: string | null;
+  /** OCR confidence 0-100; review UI flags low values. Only for kind="text". */
+  confidence?: number | null;
+  /** Hint from analyzer: should this element auto-vectorize? (slice 10c) */
+  vectorizable?: boolean;
 }
 
 export interface ComposeDiscoverRequest {
@@ -238,6 +227,8 @@ export interface ComposeDiscoverResponse {
   trim_mm: { w: number; h: number };
   elements: ElementSpec[];
   discovery_cost_usd: number;
+  ocr_available: boolean;
+  ocr_lang: string | null;
 }
 
 export interface ComposeAssembleRequest {
@@ -246,6 +237,8 @@ export interface ComposeAssembleRequest {
   quality?: "low" | "medium" | "high" | "auto";
   dpi?: number;
   color_space?: "CMYK" | "RGB";
+  /** Auto-vectorize line-art elements during assembly (slice 10c). */
+  vectorize?: boolean;
 }
 
 export interface ComposeElement {
@@ -268,6 +261,26 @@ export interface ComposeAssembleResponse {
   color_space: string;
   width_px: number;
   height_px: number;
+  /** Sibling SVG composite produced alongside the PSD (slice 10c). */
+  svg_asset_id: number | null;
+  svg_url: string | null;
+  svg_vector_count: number;
+  svg_raster_count: number;
+  vector_cost_usd: number;
+}
+
+// Slice 10e — Design Round flatten
+export interface DesignFlattenRequest {
+  source_asset_id: number;
+  quality?: "low" | "medium" | "high" | "auto";
+}
+
+export interface DesignFlattenResponse {
+  asset: Asset;
+  source_asset_id: number;
+  flattened_from: number;
+  provider_cost_usd: number;
+  user_cost_usd: number;
 }
 
 export type CdrProvider = "cloudconvert" | "uniconvertor";
@@ -325,7 +338,6 @@ export interface SettingsOut {
   tesseract_cmd: string;
   tesseract_present: boolean;
   tesseract_lang: string;
-  tier_c_enabled: boolean;
   print_icc_path: string;
   print_icc_present: boolean;
   print_icc_name: string;
@@ -349,7 +361,6 @@ export interface SettingsPatch {
   cdr_timeout_s?: number;
   cloudconvert_sandbox?: boolean;
   log_level?: "debug" | "info" | "warning" | "error";
-  tier_c_enabled?: boolean;
   tesseract_cmd?: string;
   tesseract_lang?: string;
   print_icc_path?: string;
@@ -458,6 +469,16 @@ export const api = {
     });
   },
 
+  updateWorkspace(
+    slug: string,
+    body: WorkspaceUpdate,
+  ): Promise<Workspace> {
+    return request<Workspace>(`/api/packaging/workspaces/${slug}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  },
+
   deleteWorkspace(
     slug: string,
     body: WorkspaceDeleteRequest = {},
@@ -506,13 +527,6 @@ export const api = {
     });
   },
 
-  exportPsd(slug: string, body: PsdExportRequest): Promise<PsdExportResponse> {
-    return request<PsdExportResponse>(
-      `/api/packaging/workspaces/${slug}/exports/psd`,
-      { method: "POST", body: JSON.stringify(body) },
-    );
-  },
-
   exportPdf(slug: string, body: PdfExportRequest): Promise<PdfExportResponse> {
     return request<PdfExportResponse>(
       `/api/packaging/workspaces/${slug}/exports/pdf`,
@@ -558,6 +572,17 @@ export const api = {
   ): Promise<ComposeAssembleResponse> {
     return request<ComposeAssembleResponse>(
       `/api/packaging/workspaces/${slug}/exports/psd-composable`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  },
+
+  // Slice 10e — Design Round flatten
+  designFlatten(
+    slug: string,
+    body: DesignFlattenRequest,
+  ): Promise<DesignFlattenResponse> {
+    return request<DesignFlattenResponse>(
+      `/api/packaging/workspaces/${slug}/design/flatten`,
       { method: "POST", body: JSON.stringify(body) },
     );
   },

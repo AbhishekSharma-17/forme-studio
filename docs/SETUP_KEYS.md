@@ -14,7 +14,7 @@ the header should flip from grey to **green**.
 | `CLOUDCONVERT_SANDBOX_API_KEY`        | CDR sandbox — dev only           | **Free** (watermarked output) |
 | `FORME_INKSCAPE_PATH`                 | Vector fallback                  | **Free** (local binary) |
 | `FORME_UNICONVERTOR_PATH`             | CDR fallback                     | **Free** (sK1 local binary) |
-| `FORME_TESSERACT_CMD`                 | Tier A+OCR text overlays         | **Free** (local binary) |
+| `FORME_TESSERACT_CMD`                 | OCR inside Make print-ready      | **Free** (local binary) |
 
 ## Provider architecture
 
@@ -117,16 +117,19 @@ free but watermarks output — flip the toggle in Settings to switch.
 
 ## 4. Tesseract OCR (local, free)
 
-Needed for **Tier A+OCR PSD exports** — the tier that detects every
-text region on the design and writes one named layer per region so
-designers can spot-fix garbled small print without re-rendering.
+The Make-print-ready pipeline runs OCR automatically as part of its
+unified analyze pass. Each detected text region becomes an editable
+row in the review dialog. If Tesseract isn't installed, the pipeline
+silently falls back to graphics-only and you can still add text
+blocks by hand.
 
 ```
-brew install tesseract
+brew install tesseract           # macOS
+apt install tesseract-ocr        # Debian / Ubuntu
 ```
 
-Then in Settings → *Tier A+OCR · editable text layers*, flip the toggle
-on (`FORME_TIER_C_ENABLED=true` is the env-var equivalent).
+Verify with `tesseract --version`. The Settings dashboard's *OCR ·
+Tesseract* card shows green when the binary is found.
 
 ---
 

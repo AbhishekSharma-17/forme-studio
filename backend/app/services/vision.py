@@ -23,7 +23,15 @@ from openai import AsyncOpenAI
 
 log = structlog.get_logger(__name__)
 
-ElementKind = Literal["graphic", "wordmark", "headline", "ornament", "seal", "body_copy"]
+ElementKind = Literal[
+    "graphic",
+    "wordmark",
+    "headline",
+    "ornament",
+    "seal",
+    "body_copy",
+    "text",  # OCR-discovered text region; rendered via Pillow, not gpt-image-2
+]
 
 
 @dataclass(frozen=True)
@@ -40,17 +48,33 @@ class ElementSpec:
     prompt : str
         Self-contained prompt to feed gpt-image-2 to regenerate this
         element alone on a transparent background. Must NOT reference
-        "the whole sticker" — only the element itself.
+        "the whole sticker" — only the element itself. For ``kind="text"``
+        this is informational only (the actual render comes from ``text``).
     position_mm : tuple[float, float, float, float]
         ``(x, y, width, height)`` in millimetres, measured from the
         top-left of the **trim** (NOT the bleed-extended canvas).
     size_px : str
         gpt-image-2 native size to render at: ``"1024x1024"``,
         ``"1024x1536"``, or ``"1536x1024"``. The assembler downscales
-        as needed when placing into the PSD.
+        as needed when placing into the PSD. For ``kind="text"`` this is
+        the *target render size* the Pillow text-layer is rasterised to.
     kind : ElementKind
-        Coarse category — affects assembly z-order and the "skip this"
-        UX (body_copy can be left to Tesseract instead).
+        Coarse category. ``text`` elements come from OCR and are
+        rendered via Pillow; everything else routes through gpt-image-2.
+    text : str | None
+        The exact string content. ONLY populated for ``kind="text"``
+        elements. The unified analyzer extracts this from OCR. The user
+        can edit it in the review UI before assembly.
+    confidence : float | None
+        OCR confidence (0-100). ONLY populated for ``kind="text"``.
+        The review UI flags entries below ~75 as potentially garbled.
+    vectorizable : bool
+        Hint from the analyzer: should this element be auto-vectorized
+        (Vectorizer.AI) during assembly so SVG/CDR exports stay crisp?
+        True for line art (logos, wordmarks, ornaments), False for
+        photo-realistic illustrations. ``text`` elements are rendered
+        directly so the flag is informational; assemble paths handle
+        text specially regardless.
     """
 
     name: str
@@ -59,6 +83,9 @@ class ElementSpec:
     position_mm: tuple[float, float, float, float]
     size_px: str
     kind: ElementKind
+    text: str | None = None
+    confidence: float | None = None
+    vectorizable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +95,9 @@ class ElementSpec:
             "position_mm": list(self.position_mm),
             "size_px": self.size_px,
             "kind": self.kind,
+            "text": self.text,
+            "confidence": self.confidence,
+            "vectorizable": self.vectorizable,
         }
 
     @classmethod
@@ -85,6 +115,13 @@ class ElementSpec:
             ),
             size_px=str(data.get("size_px", "1024x1024")),
             kind=str(data.get("kind", "graphic")),  # type: ignore[arg-type]
+            text=(str(data["text"]) if data.get("text") is not None else None),
+            confidence=(
+                float(data["confidence"])
+                if data.get("confidence") is not None
+                else None
+            ),
+            vectorizable=bool(data.get("vectorizable", False)),
         )
 
 
@@ -118,16 +155,24 @@ is an array. Each element object MUST contain:
                 "ornament" (decorative shape/divider/frame),
                 "seal" (badge/sticker-within-sticker), "body_copy"
                 (small dense paragraphs — better handled by OCR).
+  vectorizable — boolean. true if this element is line art / clean
+                shapes / flat colours that would benefit from being
+                vectorized (logos, wordmarks, simple ornaments, icons).
+                false for photo-realistic illustrations, gradients,
+                watercolour textures, or anything where vector tracing
+                would produce thousands of messy paths. Headlines and
+                body_copy are always false (text is rendered separately,
+                not vectorized).
 
 GUIDELINES:
 - Decompose into 5-12 elements. Too few = loss of editability;
   too many = visual noise + cost.
 - DO NOT include a separate "background" element; the assembler builds
   the background canvas itself.
+- DO NOT include text regions in this manifest — text is handled by a
+  separate OCR pass. Only describe genuinely visual graphic elements.
 - For "body_copy" elements (long ingredients / directions lists),
-  include them in the manifest so the user knows they exist, but flag
-  with kind="body_copy" so the UI can route them to OCR instead of
-  per-element generation.
+  do NOT emit them either; OCR will pick them up.
 - The output MUST be valid JSON. No prose, no markdown, no code fences.
 """
 

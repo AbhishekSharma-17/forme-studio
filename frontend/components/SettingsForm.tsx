@@ -243,65 +243,38 @@ export function SettingsForm({ initial }: Props) {
         </CardBody>
       </Card>
 
-      {/* ─── Tier A+OCR (editable text overlays) ─── */}
+      {/* ─── OCR (Tesseract — runs automatically inside Make print-ready) ─── */}
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <Layers size={16} className="text-clay-600" />
-            <CardTitle>Tier A+OCR · editable text layers</CardTitle>
+            <CardTitle>OCR · Tesseract</CardTitle>
           </div>
-          <Badge tone={snapshot.tier_c_enabled ? "sage" : "neutral"}>
-            {snapshot.tier_c_enabled ? "on" : "off"}
+          <Badge tone={snapshot.tesseract_present ? "sage" : "warning"}>
+            {snapshot.tesseract_present ? "found" : "missing"}
           </Badge>
         </CardHeader>
         <CardBody className="space-y-5">
-          <div>
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <div className="text-sm font-medium text-ink-800">
-                  Enable Tier A+OCR exports
-                </div>
-                <p className="text-xs text-ink-500 mt-0.5 max-w-md">
-                  Adds Tesseract-OCR'd text regions as named layers on
-                  top of the flat PSD + a JSON sidecar. Off by default —
-                  toggle on after verifying Tesseract is installed below.
-                  For a fully multi-layered editable PSD, use the{" "}
-                  <em>Composable</em> option in the PSD dropdown.
-                </p>
-              </div>
-              <label className="relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center">
-                <input
-                  type="checkbox"
-                  className="peer sr-only"
-                  checked={Boolean(v("tier_c_enabled", snapshot.tier_c_enabled))}
-                  onChange={(e) => update("tier_c_enabled", e.target.checked)}
-                />
-                <span className="absolute inset-0 rounded-full bg-ink-200 transition-colors peer-checked:bg-sage-600" />
-                <span className="absolute left-1 h-4 w-4 rounded-full bg-white shadow transition-transform peer-checked:translate-x-5" />
-              </label>
-            </div>
-          </div>
+          <p className="text-xs text-ink-500 leading-relaxed">
+            Tesseract runs inside the unified Make-print-ready analyze
+            pass. When the binary is present every detected text region
+            shows up in the Compose review dialog where you can edit it
+            before assembly. When missing, the pipeline silently falls
+            back to vision-only (graphics) and the dialog says so —
+            install with <code className="font-mono">brew install tesseract</code>{" "}
+            if you want text picked up automatically.
+          </p>
 
           <div>
             <Label htmlFor="tess-cmd" hint="Used for OCR text extraction">
               Tesseract CLI path
             </Label>
-            <div className="flex items-center gap-3">
-              <Input
-                id="tess-cmd"
-                value={String(v("tesseract_cmd", snapshot.tesseract_cmd))}
-                onChange={(e) => update("tesseract_cmd", e.target.value)}
-                className="flex-1"
-                placeholder="tesseract"
-              />
-              <Badge tone={snapshot.tesseract_present ? "sage" : "warning"}>
-                {snapshot.tesseract_present ? "found" : "missing"}
-              </Badge>
-            </div>
-            <p className="mt-1.5 text-xs text-ink-500">
-              Install with <code className="font-mono">brew install tesseract</code>{" "}
-              if missing.
-            </p>
+            <Input
+              id="tess-cmd"
+              value={String(v("tesseract_cmd", snapshot.tesseract_cmd))}
+              onChange={(e) => update("tesseract_cmd", e.target.value)}
+              placeholder="tesseract"
+            />
           </div>
 
           <div>

@@ -66,14 +66,10 @@ class Settings(BaseSettings):
         ),
     )
 
-    # OCR controls (Tesseract-driven editable text layers for Tier A+OCR).
-    # The env var name remains FORME_TIER_C_ENABLED for back-compat; semantically
-    # it now gates the only OCR pipeline (A+OCR) since Tier C was removed.
-    tier_c_enabled: bool = Field(
-        False,
-        alias="FORME_TIER_C_ENABLED",
-        description="Allow OCR-augmented PSD exports (Tier A+OCR via Tesseract).",
-    )
+    # OCR controls (Tesseract — used inside the unified analyze pass).
+    # OCR runs automatically when the binary is present. If Tesseract is
+    # missing the analyzer gracefully falls back to vision-only (graphics)
+    # and surfaces ``ocr_available=False`` in the discover response.
     tesseract_cmd: str = Field(
         "tesseract",
         alias="FORME_TESSERACT_CMD",

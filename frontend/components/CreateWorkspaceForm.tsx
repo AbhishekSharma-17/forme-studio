@@ -18,6 +18,9 @@ export function CreateWorkspaceForm({ presets }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [productType, setProductType] = useState(presets[0]?.id ?? "");
+  // Slice 10d toggle: false = "I have a finished label, recreate it";
+  // true = "I have the bottle, design something fresh on it".
+  const [designMode, setDesignMode] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,6 +35,7 @@ export function CreateWorkspaceForm({ presets }: Props) {
         name: name.trim(),
         description: description.trim() || undefined,
         product_type: productType,
+        design_mode: designMode,
       });
       router.push(`/workspaces/${ws.slug}`);
       router.refresh();
@@ -98,6 +102,27 @@ export function CreateWorkspaceForm({ presets }: Props) {
             />
           </div>
 
+          {/* ── Design-mode toggle (slice 10d) ─────────────────────── */}
+          <div className="rounded-xl border border-ink-200/60 bg-paper-50/50 p-4 space-y-3 shadow-[inset_0_1px_2px_rgba(12,10,9,0.02)]">
+            <div className="text-xs font-semibold uppercase tracking-wider text-ink-700">
+              Starting point
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <ModeCard
+                active={!designMode}
+                title="I have the design"
+                description="Upload a finished front + back label, we analyse, recreate every element, and assemble."
+                onClick={() => setDesignMode(false)}
+              />
+              <ModeCard
+                active={designMode}
+                title="I have the bottle"
+                description="Upload a plain product + style reference + brief. We design the label on the product first, then iterate, approve, and assemble."
+                onClick={() => setDesignMode(true)}
+              />
+            </div>
+          </div>
+
           {error && (
             <div className="rounded-lg border border-clay-200 bg-clay-50 px-3.5 py-2.5 text-sm text-clay-800 shadow-sm animate-fade-in">
               {error}
@@ -146,5 +171,45 @@ function Spec({ label, value }: { label: string; value: string }) {
       <dt className="text-[10px] text-ink-400 uppercase tracking-wider font-semibold">{label}</dt>
       <dd className="text-ink-850 font-medium mt-0.5 font-mono text-xs">{value}</dd>
     </div>
+  );
+}
+
+function ModeCard({
+  active,
+  title,
+  description,
+  onClick,
+}: {
+  active: boolean;
+  title: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={
+        "text-left rounded-lg border px-4 py-3.5 transition-all duration-200 " +
+        (active
+          ? "border-clay-500 bg-clay-50/60 shadow-[0_2px_8px_rgba(215,88,39,0.08)] ring-2 ring-clay-500/20"
+          : "border-ink-200/70 bg-white/70 hover:border-ink-300 hover:bg-white shadow-sm")
+      }
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-semibold text-ink-900">{title}</span>
+        <span
+          className={
+            "size-3.5 rounded-full border-2 " +
+            (active
+              ? "border-clay-600 bg-clay-600"
+              : "border-ink-300 bg-white")
+          }
+          aria-hidden
+        />
+      </div>
+      <p className="mt-1 text-xs text-ink-500 leading-relaxed">{description}</p>
+    </button>
   );
 }
