@@ -64,7 +64,23 @@ export interface PackagingPreset {
   color_space: string;
   generation_size: string;
   notes: string;
+  is_builtin?: boolean;
 }
+
+export interface ProductTypeCreate {
+  key: string;
+  label: string;
+  description?: string;
+  trim_w_mm: number;
+  trim_h_mm: number;
+  bleed_mm?: number;
+  dpi?: number;
+  color_space?: string;
+  generation_size?: string;
+  notes?: string;
+}
+
+export type ProductTypeUpdate = Partial<Omit<ProductTypeCreate, "key">>;
 
 export interface Workspace {
   id: number;
@@ -84,6 +100,18 @@ export interface WorkspaceCreate {
   product_type: string;
   description?: string;
   slug?: string;
+}
+
+export interface WorkspaceDeleteRequest {
+  /** When true, also rmtree the on-disk workspace folder. Defaults false. */
+  delete_files?: boolean;
+}
+
+export interface WorkspaceDeleteResponse {
+  slug: string;
+  deleted_assets: number;
+  deleted_audit_events: number;
+  files_deleted: boolean;
 }
 
 export interface Asset {
@@ -340,6 +368,46 @@ export const api = {
     return request<PackagingPreset[]>("/api/packaging/presets");
   },
 
+  // ---- product-types CRUD (configurable product presets) ----
+
+  listProductTypes(): Promise<PackagingPreset[]> {
+    return request<PackagingPreset[]>("/api/packaging/product-types");
+  },
+
+  createProductType(body: ProductTypeCreate): Promise<PackagingPreset> {
+    return request<PackagingPreset>("/api/packaging/product-types", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  updateProductType(
+    key: string,
+    body: ProductTypeUpdate,
+  ): Promise<PackagingPreset> {
+    return request<PackagingPreset>(
+      `/api/packaging/product-types/${key}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    );
+  },
+
+  async deleteProductType(key: string): Promise<void> {
+    const res = await fetch(
+      `${BASE_URL}/api/packaging/product-types/${key}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok && res.status !== 204) {
+      let detail = `${res.status} ${res.statusText}`;
+      try {
+        const body = await res.json();
+        if (body?.detail) detail = String(body.detail);
+      } catch {
+        /* not json */
+      }
+      throw new ApiError(res.status, detail);
+    }
+  },
+
   listWorkspaces(): Promise<Workspace[]> {
     return request<Workspace[]>("/api/packaging/workspaces");
   },
@@ -353,6 +421,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     });
+  },
+
+  deleteWorkspace(
+    slug: string,
+    body: WorkspaceDeleteRequest = {},
+  ): Promise<WorkspaceDeleteResponse> {
+    return request<WorkspaceDeleteResponse>(
+      `/api/packaging/workspaces/${slug}`,
+      { method: "DELETE", body: JSON.stringify(body) },
+    );
   },
 
   listAssets(slug: string, kind?: string): Promise<Asset[]> {

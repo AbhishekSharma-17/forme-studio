@@ -37,6 +37,12 @@ export async function AppShell({ children }: AppShellProps) {
               Workspaces
             </Link>
             <Link
+              href="/product-types"
+              className="rounded-lg px-3 py-1.5 text-sm font-medium text-ink-600 hover:bg-paper-200/70 hover:text-ink-900 transition-all duration-200"
+            >
+              Product types
+            </Link>
+            <Link
               href="/settings"
               className="rounded-lg px-3 py-1.5 text-sm font-medium text-ink-600 hover:bg-paper-200/70 hover:text-ink-900 transition-all duration-200"
             >

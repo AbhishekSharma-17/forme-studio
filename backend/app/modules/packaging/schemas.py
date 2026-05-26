@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 
 class PackagingPresetOut(BaseModel):
-    id: str
+    id: str                  # the `key` field — kept as `id` for API back-compat
     label: str
     description: str
     trim_mm: dict[str, float]
@@ -18,6 +18,40 @@ class PackagingPresetOut(BaseModel):
     color_space: str
     generation_size: str
     notes: str
+    is_builtin: bool = False
+
+
+class ProductTypeCreate(BaseModel):
+    """Body for ``POST /api/packaging/product-types``."""
+
+    key: str = Field(..., min_length=2, max_length=80, pattern=r"^[a-z0-9_]+$")
+    label: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    trim_w_mm: float = Field(..., gt=0, le=2000)
+    trim_h_mm: float = Field(..., gt=0, le=2000)
+    bleed_mm: float = Field(default=3.0, ge=0, le=30)
+    dpi: int = Field(default=300, ge=72, le=1200)
+    color_space: str = Field(default="CMYK", max_length=10)
+    generation_size: str = Field(default="1024x1536", max_length=20)
+    notes: str = Field(default="", max_length=1000)
+
+
+class ProductTypeUpdate(BaseModel):
+    """Partial body for ``PATCH /api/packaging/product-types/{key}``.
+
+    All fields optional. `key` and `is_builtin` are intentionally absent
+    — keys are immutable, and the seeded baseline is uneditable.
+    """
+
+    label: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    trim_w_mm: float | None = Field(default=None, gt=0, le=2000)
+    trim_h_mm: float | None = Field(default=None, gt=0, le=2000)
+    bleed_mm: float | None = Field(default=None, ge=0, le=30)
+    dpi: int | None = Field(default=None, ge=72, le=1200)
+    color_space: str | None = Field(default=None, max_length=10)
+    generation_size: str | None = Field(default=None, max_length=20)
+    notes: str | None = Field(default=None, max_length=1000)
 
 
 class WorkspaceCreate(BaseModel):
@@ -212,6 +246,33 @@ class VectorExportResponse(BaseModel):
     provider: str
     mode: str | None
     size_bytes: int
+
+
+class WorkspaceDeleteRequest(BaseModel):
+    """Body for ``DELETE /workspaces/{slug}``.
+
+    By default we delete only the DB rows (Workspace + cascaded Assets +
+    AuditEvents) and leave the on-disk folder so audit trails and
+    generated artwork are recoverable. Set ``delete_files=true`` to also
+    rmtree ``<workspaces_root>/<slug>``.
+    """
+
+    delete_files: bool = Field(
+        False,
+        description=(
+            "When true, also remove the workspace's on-disk folder "
+            "(generations, references, exports, audit.log.jsonl)."
+        ),
+    )
+
+
+class WorkspaceDeleteResponse(BaseModel):
+    """Response body for the delete endpoint — what we removed."""
+
+    slug: str
+    deleted_assets: int
+    deleted_audit_events: int
+    files_deleted: bool
 
 
 class CdrExportRequest(BaseModel):

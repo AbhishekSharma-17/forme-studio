@@ -18,8 +18,8 @@ from app.config import get_settings
 from app.db import get_session
 from app.deps import get_openai_client, resolve_workspace
 from app.models.asset import Asset
+from app.models.audit import AuditEvent
 from app.models.workspace import Workspace
-from app.modules.packaging import presets as presets_lib
 from app.modules.packaging.schemas import (
     AssetOut,
     CdrExportRequest,
@@ -30,15 +30,20 @@ from app.modules.packaging.schemas import (
     PackagingPresetOut,
     PdfExportRequest,
     PdfExportResponse,
+    ProductTypeCreate,
+    ProductTypeUpdate,
     PsdExportRequest,
     PsdExportResponse,
     ReferenceUploadResponse,
     VectorExportRequest,
     VectorExportResponse,
     WorkspaceCreate,
+    WorkspaceDeleteRequest,
+    WorkspaceDeleteResponse,
     WorkspaceOut,
 )
 from app.services import audit
+from app.services import product_types as product_types_service
 from app.services.assets import (
     absolute_path,
     save_export,
@@ -95,29 +100,104 @@ router = APIRouter(prefix="/api/packaging", tags=["packaging"])
 
 
 # --------------------------------------------------------------------- presets
+def _product_type_to_out(pt: Any) -> PackagingPresetOut:
+    """Project a ``ProductType`` row to the public preset shape."""
+    return PackagingPresetOut(
+        id=pt.key,
+        label=pt.label,
+        description=pt.description,
+        trim_mm={"w": pt.trim_w_mm, "h": pt.trim_h_mm},
+        bleed_mm=pt.bleed_mm,
+        dpi=pt.dpi,
+        color_space=pt.color_space,
+        generation_size=pt.generation_size,
+        notes=pt.notes,
+        is_builtin=pt.is_builtin,
+    )
+
+
 @router.get(
     "/presets",
     response_model=list[PackagingPresetOut],
-    summary="List packaging product-type presets",
+    summary="List packaging product-type presets (built-in + custom)",
 )
-async def list_presets() -> list[PackagingPresetOut]:
-    out: list[PackagingPresetOut] = []
-    for p in presets_lib.list_presets():
-        trim_w, trim_h = p["trim_mm"]
-        out.append(
-            PackagingPresetOut(
-                id=p["id"],
-                label=p["label"],
-                description=p["description"],
-                trim_mm={"w": trim_w, "h": trim_h},
-                bleed_mm=p["bleed_mm"],
-                dpi=p["dpi"],
-                color_space=p["color_space"],
-                generation_size=p["generation_size"],
-                notes=p["notes"],
-            )
-        )
-    return out
+async def list_presets(
+    session: Session = Depends(get_session),
+) -> list[PackagingPresetOut]:
+    """Lists every product type configured in the database.
+
+    Kept under ``/presets`` for back-compat with the existing frontend;
+    the canonical name is now ``product-types`` (see the CRUD endpoints
+    below). Both routes return the same data.
+    """
+    rows = product_types_service.list_all(session)
+    return [_product_type_to_out(r) for r in rows]
+
+
+# --------------------------------------------------------- product types (CRUD)
+@router.get(
+    "/product-types",
+    response_model=list[PackagingPresetOut],
+    summary="List product types (alias for /presets)",
+)
+async def list_product_types(
+    session: Session = Depends(get_session),
+) -> list[PackagingPresetOut]:
+    rows = product_types_service.list_all(session)
+    return [_product_type_to_out(r) for r in rows]
+
+
+@router.post(
+    "/product-types",
+    response_model=PackagingPresetOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a custom product type",
+)
+async def create_product_type(
+    body: ProductTypeCreate,
+    session: Session = Depends(get_session),
+) -> PackagingPresetOut:
+    """Create a user-defined product type.
+
+    ``key`` must be unique across the table — collision with a built-in or
+    an existing custom row returns 409.
+    """
+    payload = body.model_dump()
+    row = product_types_service.create(session, payload)
+    return _product_type_to_out(row)
+
+
+@router.patch(
+    "/product-types/{key}",
+    response_model=PackagingPresetOut,
+    summary="Update a custom product type (built-ins are immutable)",
+)
+async def update_product_type(
+    key: str,
+    body: ProductTypeUpdate,
+    session: Session = Depends(get_session),
+) -> PackagingPresetOut:
+    """Edit a custom product type.
+
+    Built-in rows refuse mutation with 409. Existing workspaces using the
+    key are *not* affected — their ``specs`` were frozen at creation time.
+    """
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    row = product_types_service.update(session, key, payload)
+    return _product_type_to_out(row)
+
+
+@router.delete(
+    "/product-types/{key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a custom product type",
+)
+async def delete_product_type(
+    key: str,
+    session: Session = Depends(get_session),
+) -> None:
+    """Refuses on built-ins or when any workspace still references the key."""
+    product_types_service.delete(session, key)
 
 
 # ------------------------------------------------------------------ workspaces
@@ -131,8 +211,11 @@ async def create_workspace(
     body: WorkspaceCreate,
     session: Session = Depends(get_session),
 ) -> WorkspaceOut:
-    preset = presets_lib.get_preset(body.product_type)
-    if preset is None:
+    # Reads from the product_types table — built-in + user-created rows
+    # are both valid. Missing key → 422 with the same error users saw
+    # before this slice (back-compat).
+    pt = product_types_service.get_by_key(session, body.product_type)
+    if pt is None:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown product_type '{body.product_type}'.",
@@ -151,7 +234,9 @@ async def create_workspace(
         name=body.name,
         module="packaging",
         product_type=body.product_type,
-        specs=presets_lib.preset_to_specs(preset),
+        # Specs frozen at creation time — later edits to the product type
+        # never mutate this row.
+        specs=product_types_service.to_specs(pt),
         description=body.description,
     )
     session.add(ws)
@@ -204,6 +289,103 @@ async def get_workspace(
     workspace: Workspace = Depends(resolve_workspace),
 ) -> WorkspaceOut:
     return _workspace_to_out(workspace)
+
+
+@router.delete(
+    "/workspaces/{slug}",
+    response_model=WorkspaceDeleteResponse,
+    summary="Delete a workspace (and optionally its on-disk folder)",
+)
+async def delete_workspace(
+    body: WorkspaceDeleteRequest | None = None,
+    workspace: Workspace = Depends(resolve_workspace),
+    session: Session = Depends(get_session),
+) -> WorkspaceDeleteResponse:
+    """Remove a workspace from the database.
+
+    The Asset + AuditEvent rows for this workspace are explicitly deleted
+    (no DB-level CASCADE configured; we want the behaviour to be the
+    same on SQLite + Postgres). Optionally also rmtree the on-disk
+    folder when ``delete_files=true`` — by default we keep it so the
+    audit JSONL + generated artwork remain recoverable.
+
+    A final ``workspace.deleted`` audit row is written **before** the
+    DB row goes, so the deletion itself shows up in any global audit
+    aggregation (the per-workspace JSONL is gone with the folder).
+    """
+    import shutil
+
+    body = body or WorkspaceDeleteRequest()
+    slug = workspace.slug
+    ws_id = workspace.id
+
+    # Snapshot counts BEFORE the tombstone so the payload reflects what
+    # accumulated during the workspace's lifetime, not the deletion event
+    # itself.
+    assets_stmt = select(Asset).where(Asset.workspace_id == ws_id)
+    asset_rows = list(session.exec(assets_stmt))
+    pre_audits_stmt = select(AuditEvent).where(AuditEvent.workspace_id == ws_id)
+    pre_audit_rows = list(session.exec(pre_audits_stmt))
+    n_assets = len(asset_rows)
+    n_pre_audits = len(pre_audit_rows)
+
+    # Write the tombstone audit FIRST (still linked to the workspace).
+    audit.record(
+        session,
+        event="workspace.deleted",
+        workspace_id=ws_id,
+        workspace_slug=slug,
+        payload={
+            "name": workspace.name,
+            "module": workspace.module,
+            "product_type": workspace.product_type,
+            "deleted_assets": n_assets,
+            "deleted_audit_events": n_pre_audits,
+            "delete_files": body.delete_files,
+        },
+    )
+
+    # Re-query so we delete the snapshot + the tombstone we just inserted.
+    # The response counter reports the *actual* number of audit rows that
+    # were deleted (snapshot + tombstone).
+    final_audits = list(session.exec(pre_audits_stmt))
+    n_total_audits_deleted = len(final_audits)
+
+    # Cascade-delete in DB (children first, then the workspace itself).
+    for a in asset_rows:
+        session.delete(a)
+    for ev in final_audits:
+        session.delete(ev)
+    session.delete(workspace)
+    session.commit()
+
+    # On-disk cleanup is best-effort; failures here are logged but don't
+    # surface as 5xx because the DB state is already consistent.
+    files_deleted = False
+    if body.delete_files:
+        ws_path = workspace_root(slug)
+        if ws_path.is_dir():
+            try:
+                shutil.rmtree(ws_path)
+                files_deleted = True
+            except OSError as exc:
+                log.warning(
+                    "workspace_files_rmtree_failed", slug=slug, error=str(exc)
+                )
+
+    log.info(
+        "workspace_deleted",
+        slug=slug,
+        deleted_assets=n_assets,
+        deleted_audit_events=n_total_audits_deleted,
+        files_deleted=files_deleted,
+    )
+    return WorkspaceDeleteResponse(
+        slug=slug,
+        deleted_assets=n_assets,
+        deleted_audit_events=n_total_audits_deleted,
+        files_deleted=files_deleted,
+    )
 
 
 # ----------------------------------------------------------------- generations

@@ -882,13 +882,21 @@ function SecretRow({
   secret: SecretField;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-md border border-ink-200 bg-paper-50/60 px-3 py-2.5">
-      <span className="font-mono text-xs text-ink-700">{label}</span>
-      <span className="flex items-center gap-2">
+    <div className="flex items-center justify-between gap-4 rounded-md border border-ink-200 bg-paper-50/60 px-3 py-2.5 min-w-0">
+      {/* Label can wrap if needed but stays in its column */}
+      <span className="font-mono text-xs text-ink-700 truncate min-w-0 flex-shrink">
+        {label}
+      </span>
+      <span className="flex items-center gap-2 min-w-0 flex-shrink-0">
         {secret.set ? (
           <>
             <Badge tone="sage">set</Badge>
-            <code className="font-mono text-xs text-ink-500">{secret.preview}</code>
+            <code
+              className="font-mono text-xs text-ink-500 max-w-[160px] truncate inline-block align-middle"
+              title={secret.preview ?? undefined}
+            >
+              {secret.preview}
+            </code>
           </>
         ) : (
           <Badge tone="warning">missing</Badge>

@@ -62,12 +62,18 @@ WRITABLE_KEYS: tuple[str, ...] = (
 
 
 def _redact(secret: str | None) -> str | None:
-    """Show only the last 4 chars of a secret. Returns None if not set."""
+    """Show a fixed-length redacted preview: 8 bullets + last 4 real chars.
+
+    Returns ``None`` if not set. The fixed mask length keeps the dashboard
+    rows tidy (some secrets are 1000+ chars JWTs) AND avoids leaking the
+    true key length back to the UI.
+    """
     if not secret:
         return None
     if len(secret) <= 6:
+        # Too short to safely show a tail — just bullet the whole thing.
         return "•" * len(secret)
-    return "•" * (len(secret) - 4) + secret[-4:]
+    return "••••••••" + secret[-4:]
 
 
 # ---------------------------- schemas ----------------------------

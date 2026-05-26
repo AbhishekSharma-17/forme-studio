@@ -35,11 +35,19 @@ def reset_engine() -> None:
 
 
 def init_db() -> None:
-    """Create all tables. Call once on startup."""
+    """Create all tables + seed built-in product types. Call once on startup."""
     # Import models so SQLModel sees them before create_all.
-    from app.models import asset, audit, workspace  # noqa: F401
+    from app.models import asset, audit, product_type, workspace  # noqa: F401
 
     SQLModel.metadata.create_all(get_engine())
+
+    # Seed the five built-in product-type presets on first run. Idempotent —
+    # the service only inserts rows whose `key` doesn't already exist.
+    from app.services.product_types import seed_builtins
+
+    with Session(get_engine()) as session:
+        seed_builtins(session)
+        session.commit()
 
 
 def get_session() -> Iterator[Session]:
