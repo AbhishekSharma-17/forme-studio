@@ -38,7 +38,7 @@ from app.services.segmentation import Mask, SegmentationResult
 log = structlog.get_logger(__name__)
 
 ColorSpace = Literal["RGB", "CMYK"]
-Tier = Literal["A", "B", "C"]
+Tier = Literal["A", "A+OCR", "B", "C"]
 
 
 @dataclass(frozen=True)
@@ -306,6 +306,102 @@ def export_to_psd_tier_c(
         dpi=dpi,
         tier="C",
         layer_count=1 + len(segmentation.masks) + text_layer_count,
+        sidecar_path=sidecar,
+    )
+
+
+def export_to_psd_a_ocr(
+    *,
+    source_png_path: Path,
+    out_path: Path,
+    ocr: OcrResult,
+    color_space: ColorSpace = "CMYK",
+    dpi: int = 300,
+) -> PsdExportResult:
+    """Tier A flat PSD + Tesseract OCR text-region overlays. NO SAM-2.
+
+    Built specifically for the "I just want to fix text" workflow when
+    SAM-2 segmentation is unavailable (Replicate 404, DGX not deployed,
+    etc.). Identical OCR overlay logic to Tier C — every detected text
+    region becomes a layer named ``text: "<detected>" @<left>,<top>``
+    sitting on top of the flat CMYK base, plus a sidecar JSON.
+
+    Designer opens the PSD, sees the layers panel filled with every
+    detected text region by its actual content, and can:
+
+    * Spot OCR errors by reading the layer names
+    * Replace any layer with a real Photoshop type layer (encoded text +
+      position is the spec — designer copy-paste-types and deletes the
+      pixel overlay)
+    * Reposition text without re-rendering the entire sticker
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rgb, _ = _load_rgb(source_png_path)
+    base_image = rgb.convert("CMYK") if color_space == "CMYK" else rgb
+
+    psd = PSDImage.frompil(base_image)
+    _stamp_resolution(psd, dpi)
+    width, height = rgb.size
+
+    # OCR text overlay layers (one per region, named with the text)
+    text_layer_count = 0
+    for region in ocr.regions:
+        left, top, right, bottom = region.bbox
+        w, h = right - left, bottom - top
+        if w <= 0 or h <= 0:
+            continue
+        crop = rgb.crop((left, top, right, bottom)).convert("RGBA")
+        safe = region.text.replace("\n", " ").replace("\t", " ").strip()
+        if len(safe) > 60:
+            safe = safe[:57] + "…"
+        layer_name = f'text: "{safe}" @{left},{top}'
+        layer = PixelLayer.frompil(
+            crop, psd, name=layer_name, top=top, left=left
+        )
+        psd.append(layer)
+        text_layer_count += 1
+
+    psd.save(str(out_path))
+
+    # JSON sidecar — same shape as Tier C but with no segmentation block
+    sidecar = out_path.with_suffix(".ocr.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "source_png": str(source_png_path),
+                "lang": ocr.lang,
+                "tier": "A+OCR",
+                "regions": [
+                    {
+                        "text": r.text,
+                        "bbox": list(r.bbox),
+                        "confidence": r.confidence,
+                        "line_id": r.line_id,
+                    }
+                    for r in ocr.regions
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    log.info(
+        "psd_tier_a_ocr_saved",
+        path=str(out_path),
+        text_layers=text_layer_count,
+        sidecar=str(sidecar),
+    )
+    return PsdExportResult(
+        path=out_path,
+        size_bytes=out_path.stat().st_size,
+        width=width,
+        height=height,
+        color_space=color_space,
+        dpi=dpi,
+        tier="A+OCR",
+        layer_count=1 + text_layer_count,
         sidecar_path=sidecar,
     )
 

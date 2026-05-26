@@ -65,6 +65,7 @@ from app.services.export_pdf import (
 from app.services.export_psd import (
     derive_export_filename,
     export_to_psd,
+    export_to_psd_a_ocr,
     export_to_psd_tier_b,
     export_to_psd_tier_c,
 )
@@ -861,20 +862,29 @@ async def export_psd(
         )
     color_space = body.color_space.upper()
 
-    tier = body.tier.upper()
-    if tier not in {"A", "B", "C"}:
+    # Normalise tier — accept "A+OCR" / "A_OCR" / "OCR" all → "A+OCR"
+    raw_tier = body.tier.upper().replace("_", "+").replace(" ", "")
+    if raw_tier == "OCR":
+        raw_tier = "A+OCR"
+    tier = raw_tier
+    if tier not in {"A", "B", "C", "A+OCR"}:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"tier must be 'A', 'B', or 'C', got '{body.tier}'.",
+            detail=(
+                f"tier must be 'A', 'A+OCR', 'B', or 'C', got '{body.tier}'."
+            ),
         )
 
     settings = get_settings()
-    if tier == "C" and not settings.tier_c_enabled:
+    # Tier C (SAM-2 + OCR) and A+OCR (OCR-only) both need the OCR pipeline,
+    # which is gated by the same FORME_TIER_C_ENABLED toggle.
+    if tier in {"C", "A+OCR"} and not settings.tier_c_enabled:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
-                "Tier C is disabled. Enable FORME_TIER_C_ENABLED=true "
-                "in your .env (or toggle in the Settings page)."
+                f"Tier {tier} requires OCR which is disabled. Enable "
+                "FORME_TIER_C_ENABLED=true in your .env (or toggle in "
+                "Settings → Tier C)."
             ),
         )
 
@@ -903,6 +913,23 @@ async def export_psd(
             result = export_to_psd(
                 source_png_path=source_path,
                 out_path=out_path,
+                color_space=color_space,  # type: ignore[arg-type]
+                dpi=body.dpi,
+            )
+        elif tier == "A+OCR":
+            # Flat PSD + OCR text overlays. NO segmentation dependency —
+            # this exists specifically so users can fix garbled text
+            # without needing SAM-2/SAM-3 to be available.
+            try:
+                ocr_result = ocr_extract(source_path.read_bytes())
+            except OcrUnavailableError as exc:
+                raise HTTPException(
+                    status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+                ) from exc
+            result = export_to_psd_a_ocr(
+                source_png_path=source_path,
+                out_path=out_path,
+                ocr=ocr_result,
                 color_space=color_space,  # type: ignore[arg-type]
                 dpi=body.dpi,
             )

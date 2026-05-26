@@ -241,7 +241,7 @@ def test_export_tier_c_blocked_when_disabled(
         json={"source_asset_id": src_id, "tier": "C"},
     )
     assert res.status_code == 503
-    assert "Tier C is disabled" in res.json()["detail"]
+    assert "Tier C requires OCR which is disabled" in res.json()["detail"]
 
 
 def test_export_invalid_tier_returns_422(
@@ -255,3 +255,103 @@ def test_export_invalid_tier_returns_422(
     )
     assert res.status_code == 422
     assert "tier must be" in res.json()["detail"]
+
+
+# ---------------------- Tier A + OCR (no SAM-2 dependency) ----------------------
+
+
+def test_export_tier_a_ocr_writes_text_layers_and_sidecar_without_segmentation(
+    client: TestClient,
+    isolated_paths: Path,
+    fake_openai: StubOpenAIClient,
+    stub_ocr: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tier 'A+OCR' = flat PSD + Tesseract text overlays, NO SAM-2 call.
+
+    Pin both behaviours: (a) text layers appear named with the detected
+    string + position, (b) the segmentation service is never invoked
+    (so a broken SAM-2 model can't break this tier).
+    """
+    monkeypatch.setenv("FORME_TIER_C_ENABLED", "true")
+    import app.config as config_module
+    config_module._settings = None
+
+    # Sentinel: if the route ever calls segmentation for A+OCR, this fires.
+    import app.modules.packaging.routes as routes_module
+
+    async def _no_segmentation_allowed(_bytes: bytes) -> SegmentationResult:
+        raise AssertionError(
+            "Tier A+OCR must NOT call segmentation"
+        )
+
+    monkeypatch.setattr(routes_module, "run_segmentation", _no_segmentation_allowed)
+
+    ws = _create_workspace(client)
+    src_id = _generate(client, ws["slug"])
+
+    res = client.post(
+        f"/api/packaging/workspaces/{ws['slug']}/exports/psd",
+        json={"source_asset_id": src_id, "tier": "A+OCR"},
+    )
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["tier"] == "A+OCR"
+    # 1 base layer + 3 stub OCR text layers = 4 total
+    assert body["layer_count"] == 4
+    assert body["sidecar_url"] is not None
+    # text_layer_count is only populated for Tier C/A+OCR
+    assert body["text_layer_count"] == 3
+
+    # Sidecar lives next to the PSD and lists each region
+    psd_path = isolated_paths / "workspaces" / ws["slug"] / body["asset"]["relative_path"]
+    sidecar = psd_path.with_suffix(".ocr.json")
+    assert sidecar.is_file()
+    sidecar_data = json.loads(sidecar.read_text())
+    assert sidecar_data["tier"] == "A+OCR"
+    assert {r["text"] for r in sidecar_data["regions"]} == {"Glow", "Serenity", "Lotion"}
+    # And critically — NO segmentation block in the A+OCR sidecar
+    assert "segmentation" not in sidecar_data
+
+
+def test_export_tier_a_ocr_accepts_alias_just_ocr(
+    client: TestClient,
+    isolated_paths: Path,
+    fake_openai: StubOpenAIClient,
+    stub_ocr: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`tier='OCR'` is a friendlier alias for the same A+OCR pipeline."""
+    monkeypatch.setenv("FORME_TIER_C_ENABLED", "true")
+    import app.config as config_module
+    config_module._settings = None
+
+    ws = _create_workspace(client)
+    src_id = _generate(client, ws["slug"])
+
+    res = client.post(
+        f"/api/packaging/workspaces/{ws['slug']}/exports/psd",
+        json={"source_asset_id": src_id, "tier": "OCR"},
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["tier"] == "A+OCR"
+
+
+def test_export_tier_a_ocr_blocked_when_ocr_disabled(
+    client: TestClient,
+    isolated_paths: Path,
+    fake_openai: StubOpenAIClient,
+) -> None:
+    """A+OCR shares the FORME_TIER_C_ENABLED toggle since it uses OCR."""
+    ws = _create_workspace(client)
+    src_id = _generate(client, ws["slug"])
+
+    # The conftest leaves FORME_TIER_C_ENABLED unset → defaults to false
+    res = client.post(
+        f"/api/packaging/workspaces/{ws['slug']}/exports/psd",
+        json={"source_asset_id": src_id, "tier": "A+OCR"},
+    )
+    assert res.status_code == 503
+    detail = res.json()["detail"]
+    assert "A+OCR" in detail
+    assert "FORME_TIER_C_ENABLED" in detail
