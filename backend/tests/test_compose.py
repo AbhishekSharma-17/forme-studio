@@ -134,6 +134,16 @@ def _patch_image_gen(
 
     fake_openai.images.generate = _gen  # type: ignore[method-assign]
 
+    # Bypass rembg in tests — model download (176 MB) + ONNX inference is
+    # both slow and unnecessary here: the stub PNG is already RGBA. The
+    # bg-removal call site is exercised end-to-end live in the smoke run.
+    import app.services.compose as compose_module
+
+    async def _identity_remove(png_bytes: bytes) -> bytes:
+        return png_bytes
+
+    monkeypatch.setattr(compose_module, "remove_background", _identity_remove)
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  DISCOVER

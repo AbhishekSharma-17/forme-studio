@@ -17,6 +17,8 @@ dependencies = [
     "psd-tools>=1.10.0",
     "pytesseract>=0.3.13",
     "reportlab>=4.2.5",
+    "rembg>=2.0.50",
+    "onnxruntime>=1.20",
 ]
 
 [project.optional-dependencies]

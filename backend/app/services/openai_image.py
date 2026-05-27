@@ -52,6 +52,19 @@ class GenerationResult(TypedDict):
 # ---------- non-streaming ------------------------------------------------
 
 
+# Prompt prefix used when ``transparent_background=True``. The currently
+# pinned gpt-image-2 snapshot rejects the API-level ``background="transparent"``
+# kwarg, so we ask the model directly in the prompt — gpt-image-2 honours
+# the instruction reliably and returns an RGBA PNG with the subject isolated
+# on a transparent canvas. Worded firmly so the model can't silently fall
+# back to a white/checker fill.
+_TRANSPARENT_BG_PROMPT_PREFIX = (
+    "Render this on a fully transparent background. Isolated subject only — "
+    "no backdrop, no surroundings, no colour fill, no shadow plate. Output a "
+    "clean PNG with an alpha channel showing just the subject and nothing else. "
+)
+
+
 async def generate(
     client: AsyncOpenAI,
     *,
@@ -68,24 +81,26 @@ async def generate(
     ``size`` must be a value gpt-image-2 accepts directly
     (1024x1024, 1024x1536, 1536x1024, 2048x2048, …).
 
-    When ``transparent_background=True`` we add the gpt-image-2 native
-    alpha-channel flag — the model produces a true RGBA PNG with the
-    background cleanly transparent. Used by the composable-PSD workflow
-    (slice 8) so each element layer drops cleanly onto the assembled
+    When ``transparent_background=True`` we prepend
+    :data:`_TRANSPARENT_BG_PROMPT_PREFIX` to the prompt instead of passing
+    OpenAI's ``background="transparent"`` parameter — the pinned gpt-image-2
+    snapshot rejects that kwarg, but it honours an in-prompt instruction
+    natively and returns an RGBA PNG. Used by the composable-PSD workflow
+    (slice 8/10) so each element layer drops cleanly onto the assembled
     canvas without SAM-2 masking artefacts.
     """
+    effective_prompt = (
+        _TRANSPARENT_BG_PROMPT_PREFIX + prompt if transparent_background else prompt
+    )
     kwargs: dict[str, object] = {
         "model": model,
-        "prompt": prompt,
+        "prompt": effective_prompt,
         "size": size,
         "quality": quality,
         "n": n,
     }
     if timeout is not None:
         kwargs["timeout"] = timeout
-    if transparent_background:
-        # gpt-image-2 honours `background="transparent"` natively.
-        kwargs["background"] = "transparent"
     res = await client.images.generate(**kwargs)  # type: ignore[call-overload]
     images = [d.b64_json for d in (res.data or []) if d.b64_json]
     return GenerationResult(

@@ -8,7 +8,11 @@ flat baked image." Architecture:
   1. ``app.services.analyze.analyze`` → unified manifest (graphics + OCR text)
   2. ``generate_element`` → transparent PNG bytes per element
      • ``kind="text"`` → Pillow renders the confirmed string
-     • everything else → gpt-image-2 with transparent_background=True
+     • everything else → gpt-image-2 with ``transparent_background=True``.
+       Under the hood that prepends a transparent-background instruction
+       to the prompt rather than passing OpenAI's ``background=transparent``
+       parameter — the pinned gpt-image-2 snapshot rejects the API kwarg
+       but honours an in-prompt directive natively (returns RGBA PNG).
   3. ``assemble_composable_psd`` → CMYK 300 DPI PSD with one layer per
      element, positioned in millimetres relative to the trim.
 
@@ -31,6 +35,7 @@ from PIL import Image, ImageDraw, ImageFont
 from psd_tools import PSDImage
 from psd_tools.api.layers import PixelLayer
 
+from app.services.bg_removal import remove_background
 from app.services.openai_image import generate as openai_generate
 from app.services.pricing import cost_from_usage
 from app.services.vector import vectorize as run_vectorize
@@ -158,7 +163,11 @@ async def generate_element(
     * ``"text"`` → ``_render_text_element()`` rasterises ``spec.text``
       into a clean PNG using Pillow + a system / bundled font. Zero
       OpenAI cost.
-    * everything else → gpt-image-2 with ``background="transparent"``.
+    * everything else → gpt-image-2 via ``openai_image.generate`` with
+      ``transparent_background=True``. The helper prepends a transparent-
+      background directive to the prompt (gpt-image-2 rejects the
+      API-level ``background=transparent`` kwarg on the pinned snapshot
+      but honours an in-prompt instruction reliably).
 
     Each non-text element gets the model's full attention — no surrounding
     composition to fight — so quality per element is usually higher than
@@ -190,8 +199,15 @@ async def generate_element(
             f"gpt-image-2 returned no image for element '{spec.name}'."
         )
     png_bytes = base64.b64decode(result["images_b64"][0])
+    # gpt-image-2 ignores OpenAI's background=transparent kwarg on the
+    # pinned snapshot; the in-prompt directive only nudges it toward a
+    # clean *visual* backdrop, but the returned PNG is still 100% opaque.
+    # Strip the backdrop to a real alpha matte via rembg (u2net, local).
+    # Pure compute, zero $$ — see app.services.bg_removal.
+    png_bytes = await remove_background(png_bytes)
     with Image.open(io.BytesIO(png_bytes)) as img:
-        # Force RGBA in case the model returned RGB (rare but defensive).
+        # Force RGBA in case the input was RGB (defensive — rembg already
+        # returns RGBA, but the Pillow keying fallback is paranoid).
         rgba = img.convert("RGBA")
         w, h = rgba.size
         buf = io.BytesIO()
